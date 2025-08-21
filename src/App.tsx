@@ -208,7 +208,7 @@ function coinSwapGroups(rows: Row[]) {
     map.set(key, g);
   }
   const lines = [];
-  for (const [_, group] of map.entries()) {
+  for (const [, group] of map.entries()) {
     const t = group[0].time;
     const kind = group.some((g) => g.type === "AUTO_EXCHANGE")
       ? "AUTO_EXCHANGE"
@@ -438,7 +438,7 @@ export default function App() {
       out.push(`Asset: ${asset}`);
 
       if (r) {
-        pushIf(r.pos > EPS, `  Profit in ${asset: string}: +${fmtAbs(r.pos)}`);
+        pushIf(r.pos > EPS, `  Profit in ${asset}: +${fmtAbs(r.pos)}`);
         pushIf(r.neg > EPS, `  Loss in ${asset}: -${fmtAbs(r.neg)}`);
       }
       if (c) {
@@ -560,7 +560,7 @@ export default function App() {
             <div style={{ fontSize: 12, whiteSpace: "pre-wrap", background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 8, maxHeight: 200, overflow: "auto" }}>
               {rows
                 .filter((r) => !KNOWN_TYPES.has(r.type) && !r.type.startsWith(EVENT_PREFIX))
-                .map((r, i) => `• No recognized TYPE token\n${r.raw}`)
+                .map((r) => `• No recognized TYPE token\n${r.raw}`)
                 .join("\n")}
             </div>
           </section>
