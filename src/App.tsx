@@ -579,15 +579,15 @@ export default function App() {
         pushIf(f.neg > EPS, `  Funding Fee Paid in ${asset}: −${fmtAbs(f.neg)}`);
       }
       if (i) {
-        pushIf(i.pos > EPS, `  Liquidation Clerarance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
-        pushIf(i.neg > EPS, `  Liquidation Clerarance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
+        pushIf(i.pos > EPS, `  Liquidation Clearance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
+        pushIf(i.neg > EPS, `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
       }
       if (sw) {
         pushIf(sw.pos > EPS, `  The Coin-Swap Received ${asset}: +${fmtAbs(sw.pos)}`);
         pushIf(sw.neg > EPS, `  The Coin-Swap Used ${asset}: −${fmtAbs(sw.neg)}`);
       }
-      if (ep) pushIf(ep.pos > EPS, `  The Event Contacts Payout ${asset}: +${fmtAbs(ep.pos)}`);
-      if (eo) pushIf(eo.neg > EPS, `  The Event Contacts Order ${asset}: −${fmtAbs(eo.neg)}`);
+      if (ep) pushIf(ep.pos > EPS, `  The Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
+      if (eo) pushIf(eo.neg > EPS, `  The Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
 
       const net = total[asset] ?? 0;
       pushIf(Math.abs(net) > EPS, `  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
