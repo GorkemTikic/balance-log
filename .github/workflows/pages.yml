@@ -25,18 +25,41 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          # ❌ no cache here, because there is no lockfile yet
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm i --no-audit --no-fund
+          fi
 
       - name: Build
         run: npm run build
 
+      - name: Detect output directory
+        id: detect
+        run: |
+          if [ -d dist ]; then
+            echo "out=dist" >> $GITHUB_OUTPUT
+          elif [ -d build ]; then
+            echo "out=build" >> $GITHUB_OUTPUT
+          else
+            echo "No dist/ or build/ folder produced by 'npm run build'"; exit 1
+          fi
+
+      - name: SPA fallback (optional)
+        run: |
+          OUT="${{ steps.detect.outputs.out }}"
+          if [ -f "$OUT/index.html" ]; then cp "$OUT/index.html" "$OUT/404.html"; fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: ${{ steps.detect.outputs.out }}
 
   deploy:
     needs: build
