@@ -1,18 +1,13 @@
 import React, { useMemo, useRef, useState } from "react";
 
 /**
- * Balance Log Analyzer – Polished UI (UTC+0)
+ * Balance Log Analyzer – with Excel-like Paste (UTC+0)
  *
- * - Summary excludes Coin Swaps & Auto-Exchange from the main Copy.
- * - Coin Swaps grouped per second: “YYYY-MM-DD HH:mm:ss (UTC+0) — Out: −A → In: +B”.
- * - Referral Kickback has its own Fees card.
- * - Transfers shown in General (incoming +, outgoing −).
- * - Event Contracts tab includes:
- *      • Payouts vs Orders vs Net
- *      • Event – Other Activity (any EVENT_CONTRACTS_* not ORDER/PAYOUT)
- * - Unknown NON-event types still appear in “Other Types” on Summary (so nothing is lost).
- * - Raw table remains a separate tab (Excel-like), copy/download available.
- * - Embedded CSS for a clean, readable layout without external libs.
+ * New:
+ * - GridPasteBox: accepts Ctrl/⌘+V from the website; reads text/html, extracts <table>,
+ *   preserves empty cells, shows a grid preview, and feeds TSV to the existing parser.
+ * - Manual textarea kept under a collapsible block for fallback.
+ * Everything else (summaries, grouped swaps, events, referral kickback, etc.) stays the same.
  */
 
 type Row = {
@@ -27,7 +22,7 @@ type Row = {
   raw: string;
 };
 
-const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0 text
+const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0
 const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB)$/;
 
 const SWAP_TYPES = new Set(["COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW", "AUTO_EXCHANGE"]);
@@ -44,6 +39,7 @@ const KNOWN_TYPES = new Set([
   ...Array.from(SWAP_TYPES),
 ]);
 
+/* ---------- utils ---------- */
 function fmtAbs(x: number, maxDp = 8) {
   const v = Math.abs(Number(x) || 0);
   const s = v.toFixed(maxDp);
@@ -66,7 +62,7 @@ function toCsv(rows: Row[]) {
   return [headers.join(","), ...body].join("\n");
 }
 
-// -------- Parsing ----------
+/* ---------- parsing ---------- */
 function splitColumns(line: string) {
   if (line.includes("\t")) return line.split(/\t+/);
   return line.trim().split(/\s{2,}|\s\|\s|\s+/);
@@ -88,12 +84,12 @@ function parseBalanceLog(text: string) {
   for (const line of lines) {
     const when = firstDateIn(line);
     if (!when) {
-      diags.push(`• Skipped (no time): ${line.slice(0, 140)}`);
+      diags.push(`• Skipped (no time): ${line.slice(0, 160)}`);
       continue;
     }
     const cols = splitColumns(line);
     if (cols.length < 6) {
-      diags.push(`• Skipped (too few columns): ${line.slice(0, 140)}`);
+      diags.push(`• Skipped (too few columns): ${line.slice(0, 160)}`);
       continue;
     }
 
@@ -108,7 +104,7 @@ function parseBalanceLog(text: string) {
 
     const amount = Number(amountRaw);
     if (Number.isNaN(amount)) {
-      diags.push(`• Skipped (amount not numeric): ${line.slice(0, 140)}`);
+      diags.push(`• Skipped (amount not numeric): ${line.slice(0, 160)}`);
       continue;
     }
 
@@ -131,7 +127,7 @@ function parseBalanceLog(text: string) {
   return { rows, diags };
 }
 
-// -------- Aggregation ----------
+/* ---------- aggregation ---------- */
 function sumByAsset(rows: Row[]) {
   const acc: Record<string, { pos: number; neg: number; net: number }> = {};
   for (const r of rows) {
@@ -219,7 +215,130 @@ function coinSwapGroups(rows: Row[]) {
   return lines;
 }
 
-// -------- UI helpers ----------
+/* ---------- Excel-like paste box ---------- */
+function GridPasteBox({
+  onUseTSV,
+  onError,
+}: {
+  onUseTSV: (tsv: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [grid, setGrid] = useState<string[][]>([]);
+  const [info, setInfo] = useState<string>("");
+
+  function parseHtmlToGrid(html: string): string[][] {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const tables = Array.from(doc.querySelectorAll("table"));
+    if (!tables.length) return [];
+    // choose the largest table (cells count)
+    let best: HTMLTableElement | null = null;
+    let bestScore = -1;
+    tables.forEach((t) => {
+      const score = t.querySelectorAll("tr").length * t.querySelectorAll("td,th").length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = t as HTMLTableElement;
+      }
+    });
+    if (!best) return [];
+    const rows: string[][] = [];
+    best.querySelectorAll("tr").forEach((tr) => {
+      const cells = Array.from(tr.querySelectorAll<HTMLElement>("th,td"));
+      const row = cells.map((c) => (c.textContent ?? "").trim());
+      // keep empty cells to preserve indexes
+      if (row.length) rows.push(row);
+    });
+    return rows;
+  }
+
+  function parseTextToGrid(text: string): string[][] {
+    if (!text) return [];
+    if (text.includes("\t")) {
+      return text
+        .split(/\r?\n/)
+        .filter((l) => l.trim().length)
+        .map((l) => l.split("\t"));
+    }
+    // very last resort: split by multiple spaces
+    return text
+      .split(/\r?\n/)
+      .filter((l) => l.trim().length)
+      .map((l) => l.trim().split(/\s{2,}|\s\|\s|\s+/));
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setInfo("");
+    const cd = e.clipboardData;
+    const html = cd.getData("text/html");
+    const text = cd.getData("text/plain");
+    let g: string[][] = [];
+    if (html) g = parseHtmlToGrid(html);
+    if (!g.length) g = parseTextToGrid(text);
+    if (!g.length) {
+      onError("Nothing parseable was found on the clipboard. Try copying the table itself.");
+      return;
+    }
+    setGrid(g);
+    setInfo(`Detected ${g.length} row(s) × ${Math.max(...g.map((r) => r.length))} col(s).`);
+  }
+
+  function useAndParse() {
+    if (!grid.length) {
+      onError("Paste a table first.");
+      return;
+    }
+    const tsv = grid.map((r) => r.join("\t")).join("\n");
+    onUseTSV(tsv);
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h3>Paste Table (Excel-like)</h3>
+      </div>
+      <div
+        className="dropzone"
+        contentEditable
+        suppressContentEditableWarning
+        onPaste={handlePaste}
+        onKeyDown={(e) => {
+          // Prevent typing inside; we only want paste
+          if (!(e.ctrlKey || e.metaKey) || (e.key.toLowerCase() !== "v" && e.key !== "V")) {
+            e.preventDefault();
+          }
+        }}
+      >
+        Click here and press <b>Ctrl/⌘+V</b> to paste directly from the Balance Log web page.
+      </div>
+
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        <button className="btn btn-dark" onClick={useAndParse}>
+          Use & Parse
+        </button>
+        <span className="muted">{info}</span>
+      </div>
+
+      {grid.length > 0 && (
+        <div className="tablewrap" style={{ marginTop: 10, maxHeight: 280 }}>
+          <table className="table mono small">
+            <tbody>
+              {grid.map((r, i) => (
+                <tr key={i}>
+                  {r.map((c, j) => (
+                    <td key={j}>{c}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- UI helpers ---------- */
 function RpnCard({
   title,
   map,
@@ -259,14 +378,13 @@ function fmtAssetPairs(map: Record<string, { pos: number; neg: number; net: numb
   return parts.length ? parts.join(", ") : "–";
 }
 
-// -------- Main App ----------
+/* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [diags, setDiags] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
-  const pasteRef = useRef<HTMLTextAreaElement | null>(null);
 
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
@@ -287,12 +405,7 @@ export default function App() {
     () => parsed.filter((r) => !KNOWN_TYPES.has(r.type) && !r.type.startsWith(EVENT_PREFIX)),
     [parsed]
   );
-
-  // Event-only: other activity (not order/payout)
-  const eventOther = useMemo(
-    () => events.filter((r) => !EVENT_KNOWN_CORE.has(r.type)),
-    [events]
-  );
+  const eventOther = useMemo(() => events.filter((r) => !EVENT_KNOWN_CORE.has(r.type)), [events]);
 
   const realizedByAsset = useMemo(() => sumByAsset(realizedNonEvent), [realizedNonEvent]);
   const commissionByAsset = useMemo(() => sumByAsset(commission), [commission]);
@@ -300,42 +413,41 @@ export default function App() {
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
   const insuranceByAsset = useMemo(() => sumByAsset(insurance), [insurance]);
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
-
   const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
 
-  function onParse() {
+  function runParse(tsv: string) {
     setError("");
     try {
-      const { rows: rs, diags } = parseBalanceLog(input);
-      if (!rs.length) throw new Error("No valid rows detected. Paste the full Balance Log (Ctrl/⌘+A → Ctrl/⌘+C).");
+      const { rows: rs, diags } = parseBalanceLog(tsv);
+      if (!rs.length) throw new Error("No valid rows detected.");
       setRows(rs);
       setDiags(diags);
+      setActiveTab("summary");
     } catch (e: any) {
       setError(e?.message || String(e));
       setRows([]);
+      setDiags([]);
     }
   }
-  async function onPasteAndParse() {
-    try {
-      if (navigator.clipboard?.readText) {
-        const t = await navigator.clipboard.readText();
+
+  function onParse() {
+    runParse(input);
+  }
+  function onPasteAndParseText() {
+    // legacy: readText only gets plain text
+    if (navigator.clipboard?.readText) {
+      navigator.clipboard.readText().then((t) => {
         setInput(t);
-        setTimeout(onParse, 0);
-      } else {
-        pasteRef.current?.focus();
-        alert("Press Ctrl/⌘+V to paste, then click Parse.");
-      }
-    } catch {
-      alert("Clipboard access denied. Paste manually, then click Parse.");
-      pasteRef.current?.focus();
+        setTimeout(() => runParse(t), 0);
+      });
     }
   }
+
   function sectionCopy(text: string) {
     if (!navigator.clipboard) return alert("Clipboard API not available");
     navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
   }
 
-  // Copy builders
   function copySummary() {
     const L: string[] = [];
     L.push("FD Summary (UTC+0)", "");
@@ -391,8 +503,9 @@ export default function App() {
   }
   function copySwaps() {
     const L: string[] = ["Coin Swaps & Auto-Exchange (UTC+0)", ""];
-    if (!swaps.length) L.push("None");
-    else swaps.forEach((s) => L.push(`- ${s.text}`));
+    const groups = swaps;
+    if (!groups.length) L.push("None");
+    else groups.forEach((s) => L.push(`- ${s.text}`));
     sectionCopy(L.join("\n"));
   }
   function copyEvents() {
@@ -413,7 +526,7 @@ export default function App() {
       });
     }
 
-    // Extra: Event – Other Activity
+    const eventOther = events.filter((r) => !EVENT_KNOWN_CORE.has(r.type));
     if (eventOther.length) {
       L.push("", "Event – Other Activity:");
       const byType: Record<string, Row[]> = {};
@@ -452,13 +565,10 @@ export default function App() {
 
   function runSelfTest() {
     const fixture = [
-      // swap pair (USDT -> BNB)
       "900000000001\t1059874281\tUSDT\tCOIN_SWAP_WITHDRAW\t-10\t2025-07-03 12:37:46\t\t\tSWAPID123@1.00\t2025-07-03 12:37:46",
       "900000000002\t1059874281\tBNB\tCOIN_SWAP_DEPOSIT\t0.01511633\t2025-07-03 12:37:46\t\t\tSWAPID123@1.00\t2025-07-03 12:37:46",
-      // auto-exchange pair (USDT -> USDC)
       "900000000003\t1059874281\tUSDT\tAUTO_EXCHANGE\t-9\t2025-07-03 12:47:32\t\t\tXID@1\t2025-07-03 12:47:32",
       "900000000004\t1059874281\tUSDC\tAUTO_EXCHANGE\t8.97164406\t2025-07-03 12:47:32\t\t\tXID@1\t2025-07-03 12:47:32",
-      // pnl / fees / referral / transfer / events + event-other
       "93131295767309\t1059874281\tUSDT\tREALIZED_PNL\t-1.03766\t2025-08-19 08:06:10\tAPI3USDT\t295767309\t295767309\t2025-08-19 08:06:10",
       "900605603173683\t1059874281\tUSDT\tCOMMISSION\t-0.01181965\t2025-05-09 07:57:50\tETHUSDT\t5603173683\t5603173683\t2025-05-09 07:57:50",
       "777777777777\t1059874281\tUSDT\tREFERRAL_KICKBACK\t0.005\t2025-05-09 07:58:00\t\t\t\t2025-05-09 07:58:00",
@@ -472,43 +582,26 @@ export default function App() {
     const { rows: rs } = parseBalanceLog(fixture);
     const swapLines = coinSwapGroups(rs);
     if (swapLines.length !== 2) throw new Error("Swap grouping failed");
-    const hasReferral = rs.some((r) => r.type === "REFERRAL_KICKBACK");
-    if (!hasReferral) throw new Error("Referral Kickback missing");
-    const hasEventOther = rs.some((r) => r.type === "EVENT_CONTRACTS_FEE");
-    if (!hasEventOther) throw new Error("Event – Other missing");
+    if (!rs.some((r) => r.type === "REFERRAL_KICKBACK")) throw new Error("Referral Kickback missing");
+    if (!rs.some((r) => r.type === "EVENT_CONTRACTS_FEE")) throw new Error("Event – Other missing");
     alert("Self-test passed ✅");
   }
 
   return (
     <div className="wrap">
-      {/* Embedded minimal design system */}
       <style>{css}</style>
 
       <header className="header">
         <div>
           <h1>Balance Log Analyzer</h1>
           <p className="muted">
-            UTC+0 • Paste your full Balance Log and click <strong>Parse</strong>. The main “Copy Summary” excludes coin
-            swaps & auto-exchange.
+            UTC+0 • Paste your Balance Log as a table below and click <strong>Use &amp; Parse</strong>. The main “Copy
+            Summary” excludes coin swaps & auto-exchange.
           </p>
         </div>
         <div className="btn-row">
-          <button className="btn btn-primary" onClick={onPasteAndParse}>
-            Paste & Parse
-          </button>
-          <button className="btn btn-dark" onClick={onParse}>
-            Parse
-          </button>
-          <button
-            className="btn"
-            onClick={() => {
-              setInput("");
-              setRows([]);
-              setDiags([]);
-              setError("");
-            }}
-          >
-            Clear
+          <button className="btn btn-primary" onClick={onPasteAndParseText}>
+            Paste plain text & Parse
           </button>
           <button className="btn" onClick={runSelfTest}>
             Self-Test
@@ -516,25 +609,49 @@ export default function App() {
         </div>
       </header>
 
-      {/* Paste box */}
-      <section className="card">
-        <div className="card-head">
-          <h3>Paste Balance Log Here</h3>
-        </div>
-        <textarea
-          ref={pasteRef}
-          placeholder="Paste the entire Balance Log page (Ctrl/⌘+A then Ctrl/⌘+C)"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          className="paste"
+      {/* Excel-like paste box */}
+      <section className="space">
+        <GridPasteBox
+          onUseTSV={(tsv) => {
+            setInput(tsv);
+            runParse(tsv);
+          }}
+          onError={(m) => setError(m)}
         />
-        {error && <p className="error">{error}</p>}
-        {!!diags.length && (
-          <details className="diags">
-            <summary>Diagnostics ({diags.length})</summary>
-            <textarea className="diagbox" value={diags.join("\n")} readOnly />
-          </details>
-        )}
+
+        {/* Manual textarea fallback (collapsed) */}
+        <details className="card" style={{ marginTop: 8 }}>
+          <summary className="card-head" style={{ cursor: "pointer" }}>
+            <h3>Manual Paste (fallback)</h3>
+          </summary>
+          <textarea
+            placeholder="Paste raw text or TSV here"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            className="paste"
+          />
+          <div className="btn-row" style={{ marginTop: 8 }}>
+            <button className="btn btn-dark" onClick={onParse}>
+              Parse
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                setInput("");
+                setError("");
+              }}
+            >
+              Clear
+            </button>
+          </div>
+          {error && <p className="error">{error}</p>}
+          {!!diags.length && (
+            <details className="diags">
+              <summary>Diagnostics ({diags.length})</summary>
+              <textarea className="diagbox" value={diags.join("\n")} readOnly />
+            </details>
+          )}
+        </details>
       </section>
 
       {/* Tabs */}
@@ -555,11 +672,11 @@ export default function App() {
         ))}
       </nav>
 
-      {/* SUMMARY TAB */}
+      {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
           <div className="card">
-            <div className="card-head row">
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Summary (UTC+0)</h2>
               <button className="btn btn-success" onClick={copySummary}>
                 Copy Summary (no Swaps)
@@ -568,16 +685,18 @@ export default function App() {
 
             <div className="subcard">
               <h3>Realized PnL (Futures, not Events)</h3>
-              {Object.keys(realizedByAsset).length ? (
+              {Object.keys(sumByAsset(nonEvent.filter((r) => r.type === "REALIZED_PNL"))).length ? (
                 <ul className="grid two">
-                  {Object.entries(realizedByAsset).map(([asset, v]) => (
-                    <li key={asset} className="pill">
-                      <span className="label">{asset}</span>
-                      <span className="num">
-                        Profit: +{fmtAbs(v.pos)} • Loss: −{fmtAbs(v.neg)}
-                      </span>
-                    </li>
-                  ))}
+                  {Object.entries(sumByAsset(nonEvent.filter((r) => r.type === "REALIZED_PNL"))).map(
+                    ([asset, v]) => (
+                      <li key={asset} className="pill">
+                        <span className="label">{asset}</span>
+                        <span className="num">
+                          Profit: +{fmtAbs(v.pos)} • Loss: −{fmtAbs(v.neg)}
+                        </span>
+                      </li>
+                    )
+                  )}
                 </ul>
               ) : (
                 <p className="muted">No Realized PnL found.</p>
@@ -585,17 +704,16 @@ export default function App() {
             </div>
 
             <div className="grid three">
-              <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-              <RpnCard title="Referral Kickback" map={referralByAsset} />
-              <RpnCard title="Funding Fees" map={fundingByAsset} />
-              <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-              <RpnCard title="Transfers (General)" map={transfersByAsset} />
+              <RpnCard title="Trading Fees / Commission" map={sumByAsset(commission)} />
+              <RpnCard title="Referral Kickback" map={sumByAsset(referralKick)} />
+              <RpnCard title="Funding Fees" map={sumByAsset(funding)} />
+              <RpnCard title="Insurance / Liquidation" map={sumByAsset(insurance)} />
+              <RpnCard title="Transfers (General)" map={sumByAsset(transfers)} />
             </div>
 
-            {/* By Symbol */}
             <div className="subcard">
               <h3>By Symbol (Futures, not Events)</h3>
-              {symbolBlocks.length ? (
+              {bySymbolSummary(nonEvent).length ? (
                 <div className="tablewrap">
                   <table className="table">
                     <thead>
@@ -608,7 +726,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {symbolBlocks.map((b) => (
+                      {bySymbolSummary(nonEvent).map((b) => (
                         <tr key={b.symbol}>
                           <td className="label">{b.symbol}</td>
                           <td className="num">{fmtAssetPairs(b.realizedByAsset)}</td>
@@ -625,7 +743,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Other non-event types */}
             <div className="subcard">
               <h3>Other Types (non-event)</h3>
               {otherTypesNonEvent.length ? (
@@ -638,11 +755,11 @@ export default function App() {
         </section>
       )}
 
-      {/* SWAPS TAB */}
+      {/* SWAPS */}
       {activeTab === "swaps" && (
         <section className="space">
           <div className="card">
-            <div className="card-head row">
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Coin Swaps & Auto-Exchange (UTC+0)</h2>
               <button className="btn" onClick={copySwaps}>
                 Copy Coin Swaps
@@ -664,35 +781,30 @@ export default function App() {
         </section>
       )}
 
-      {/* EVENTS TAB */}
+      {/* EVENTS */}
       {activeTab === "events" && (
         <section className="space">
           <div className="card">
-            <div className="card-head row">
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Event Contracts (separate product)</h2>
               <button className="btn" onClick={copyEvents}>
                 Copy Events
               </button>
             </div>
             <EventSummary rows={events} />
-
             <div className="subcard">
               <h3>Event – Other Activity</h3>
-              {eventOther.length ? (
-                <OtherTypesBlock rows={eventOther} />
-              ) : (
-                <p className="muted">No additional event types.</p>
-              )}
+              {eventOther.length ? <OtherTypesBlock rows={eventOther} /> : <p className="muted">None</p>}
             </div>
           </div>
         </section>
       )}
 
-      {/* RAW TAB */}
+      {/* RAW */}
       {activeTab === "raw" && rows.length > 0 && (
         <section className="space">
           <div className="card">
-            <div className="card-head row">
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Raw Parsed Table (Excel-like)</h2>
               <div className="btn-row">
                 <button className="btn" onClick={copyRaw}>
@@ -703,7 +815,6 @@ export default function App() {
                 </button>
               </div>
             </div>
-
             <div className="tablewrap">
               <table className="table mono small">
                 <thead>
@@ -736,7 +847,7 @@ export default function App() {
   );
 }
 
-// -------- Extra components ----------
+/* ---------- small components ---------- */
 function EventSummary({ rows }: { rows: Row[] }) {
   const orders = rows.filter((r) => r.type === "EVENT_CONTRACTS_ORDER");
   const payouts = rows.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT");
@@ -820,15 +931,14 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
   );
 }
 
-/* ---------- Embedded CSS (scoped) ---------- */
+/* ---------- CSS (embedded) ---------- */
 const css = `
 :root{
   --bg:#f4f6f8; --txt:#0f1720; --muted:#6b7785; --card:#ffffff; --line:#e6e9ee;
-  --primary:#0f62fe; --dark:#111827; --success:#0ea5e9; --pill:#f7f8fa;
+  --primary:#0f62fe; --dark:#111827; --success:#22c55e; --pill:#f7f8fa;
 }
-*{box-sizing:border-box}
-body{margin:0}
-.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+*{box-sizing:border-box} body{margin:0}
+.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
 .header{max-width:1080px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
 .header h1{margin:0 0 2px;font-size:26px}
 .muted{color:var(--muted)}
@@ -837,12 +947,10 @@ body{margin:0}
 .btn:hover{background:#f9fafb}
 .btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
-.btn-success{background:#22c55e;border-color:#22c55e;color:#fff}
-.space{max-width:1080px;margin:0 auto;padding:0 16px 32px}
+.btn-success{background:var(--success);border-color:var(--success);color:#fff}
+.space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;max-width:1080px}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.card-head h2,.card-head h3{margin:0}
-.row{gap:10px}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
 .grid{display:grid;gap:12px}
 .grid.two{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
@@ -869,4 +977,12 @@ body{margin:0}
 .list{margin:0;padding:0 0 0 18px}
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .tone{background:#fcfdfd}
+
+/* New: Excel-like paste box */
+.dropzone{
+  width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
+  padding:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);
+  text-align:center; user-select:none; outline:none;
+}
+.dropzone:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,98,254,0.15)}
 `;
