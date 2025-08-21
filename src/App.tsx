@@ -1,21 +1,46 @@
 import React, { useMemo, useRef, useState } from "react";
 
 /**
- * Balance Log Analyzer (UTC+0)
- * - Clear, copy-friendly summary.
- * - Overall Copy EXCLUDES Coin Swaps & Auto-Exchange (they have their own Copy).
- * - Transfers are in General (incoming +, outgoing −). Coin Swaps & Events are separate.
- * - Realized PnL shows "Total Profit <ASSET>" and "Total Loss <ASSET>".
- * - Funding vs Trading Fees (Commission) vs Insurance/Liquidation separated.
- * - Coin swap line: "YYYY-MM-DD hh:mm:ss (UTC+0) → -A ASSET → +B ASSET (COIN_SWAP|AUTO_EXCHANGE)".
- * - Raw table hidden behind a toggle; TSV copy & CSV download provided.
+ * FD Assistant – Balance Log (Robust Parser, Copy-Friendly, UTC+0)
+ * - Pasting full page text now works even if columns shift.
+ * - We detect TYPE token dynamically; amount is the token right after TYPE; asset is the token right before TYPE.
+ * - Tabs OR multi-spaces both supported. Weird spaces are cleaned.
+ * - Amounts with commas are handled.
+ * - Main summary copy EXCLUDES swaps/auto-exchange; they have their own copy button.
+ * - Raw parsed table is collapsed by default.
+ * - Hidden Diagnostics toggle helps if something still doesn’t parse.
  */
 
 // ---------- Utilities ----------
-const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/;
-const SYMBOL_RE = /^[A-Z0-9]+(?:USDT|USDC|USD|BTC|ETH|BNB|PERP)$/;
+const DATE_RE =
+  /(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{1,2}:\d{2}:\d{2})/; // supports 2025-02-04 8:09:12 or 2025/02/04 08:09:12
+const SYMBOL_RE = /^[A-Z0-9]{3,}(USDT|USDC|USD|BTC|ETH|BNB|PERP)$/;
 
-function fmtAbs(x: number | string, maxDp = 8) {
+const KNOWN_TYPES = new Set([
+  "REALIZED_PNL",
+  "FUNDING_FEE",
+  "COMMISSION",
+  "INSURANCE_CLEAR",
+  "LIQUIDATION_FEE",
+  "TRANSFER",
+  "COIN_SWAP",
+  "COIN_SWAP_DEPOSIT",
+  "COIN_SWAP_WITHDRAW",
+  "AUTO_EXCHANGE",
+  "EVENT_CONTRACTS_ORDER",
+  "EVENT_CONTRACTS_PAYOUT",
+]);
+
+const SWAP_TYPES = new Set([
+  "COIN_SWAP",
+  "COIN_SWAP_DEPOSIT",
+  "COIN_SWAP_WITHDRAW",
+  "AUTO_EXCHANGE",
+]);
+
+const EVENT_PREFIX = "EVENT_CONTRACTS_";
+
+function fmtAbs(x: number, maxDp = 8) {
   const v = Math.abs(Number(x) || 0);
   const s = v.toFixed(maxDp);
   return s.replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
@@ -28,36 +53,34 @@ function fmtSigned(x: number, maxDp = 8) {
 function toCsv(rows: any[]) {
   if (!rows.length) return "";
   const headers = Object.keys(rows[0]);
-  const escape = (v: unknown) => {
+  const escape = (v: any) => {
     const s = String(v ?? "");
     if (/[,"\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
     return s;
   };
-  const body = rows.map((r) => headers.map((h) => escape((r as any)[h])).join(","));
+  const body = rows.map((r) => headers.map((h) => escape(r[h])).join(","));
   return [headers.join(","), ...body].join("\n");
 }
 
 // ---------- Parsing ----------
-const SWAP_TYPES = new Set(["COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW", "AUTO_EXCHANGE"]);
-const EVENT_PREFIX = "EVENT_CONTRACTS_";
-const KNOWN_TYPES = new Set([
-  "REALIZED_PNL",
-  "FUNDING_FEE",
-  "COMMISSION",
-  "INSURANCE_CLEAR",
-  "LIQUIDATION_FEE",
-  "TRANSFER",
-  ...SWAP_TYPES,
-]);
-
-function splitColumns(line: string) {
-  if (line.includes("\t")) return line.split(/\t+/);
-  return line.trim().split(/\s{2,}|\s\|\s|\s{1,}/);
+function sanitizeLine(s: string) {
+  // remove non-breaking and zero-width spaces, normalize inner whitespace
+  return s.replace(/[\u00A0\u2000-\u200B]/g, " ").replace(/\s+/g, " ").trim();
 }
-
+function splitColumns(line: string) {
+  if (line.includes("\t")) return line.split(/\t+/).map((t) => t.trim());
+  // fallback: split on 2+ spaces but allow single spaces inside ids/extra
+  return line.trim().split(/\s{2,}|\s\|\s/).flatMap((chunk) => chunk.split(/\s{2,}/)).filter(Boolean);
+}
 function firstDateIn(line: string) {
   const m = line.match(DATE_RE);
-  return m ? m[1] : "";
+  return m ? m[1].replace(/\//g, "-") : "";
+}
+function toNumberLoose(token: string) {
+  // accept "-1,234.567" or "1234.5"
+  const cleaned = token.replace(/,/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : NaN;
 }
 
 type Row = {
@@ -66,52 +89,105 @@ type Row = {
   asset: string;
   type: string;
   amount: number;
-  time: string;   // keep as UTC+0 text
-  symbol: string; // may be ""
-  extra: string;  // remaining cols joined
+  time: string; // UTC+0 string
+  symbol: string;
+  extra: string;
   raw: string;
 };
 
-function parseBalanceLog(text: string): Row[] {
+type ParseDiag = {
+  line: string;
+  reason: string;
+};
+
+function parseBalanceLog(text: string): { rows: Row[]; diags: ParseDiag[] } {
   const rows: Row[] = [];
+  const diags: ParseDiag[] = [];
+
   const lines = text
-    .replace(/[\u00A0\u2000-\u200B]/g, " ")
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => sanitizeLine(l))
     .filter(Boolean);
 
   for (const line of lines) {
-    const when = firstDateIn(line);
-    if (!when) continue;
+    const time = firstDateIn(line);
+    if (!time) {
+      diags.push({ line, reason: "No date found" });
+      continue;
+    }
 
-    const cols = splitColumns(line);
-    if (cols.length < 6) continue;
+    // Try strong split first (tabs or multi-spaces). If that fails to find TYPE,
+    // fallback to a token scan across single-space splits.
+    let cols = splitColumns(line);
+    if (cols.length < 4) cols = line.split(" ");
 
-    const id = cols[0];
-    const uid = cols[1];
-    const asset = cols[2];
-    const type = cols[3];
-    const amountRaw = cols[4];
-    const symbolCandidate = cols[6] || "";
+    // Find type token index: must be KNOWN_TYPES or startsWith EVENT_CONTRACTS_
+    let typeIdx = -1;
+    for (let i = 0; i < cols.length; i++) {
+      const t = cols[i].toUpperCase();
+      if (KNOWN_TYPES.has(t) || t.startsWith(EVENT_PREFIX)) {
+        typeIdx = i;
+        break;
+      }
+    }
+    if (typeIdx === -1) {
+      diags.push({ line, reason: "No recognized TYPE token" });
+      continue;
+    }
 
-    const amount = Number(amountRaw);
-    if (Number.isNaN(amount)) continue;
+    const type = cols[typeIdx].toUpperCase();
 
+    // Heuristic: asset is token before type, amount is token after type
+    if (typeIdx === 0 || typeIdx >= cols.length - 1) {
+      diags.push({ line, reason: "TYPE at start or end – cannot infer asset/amount" });
+      continue;
+    }
+
+    const asset = cols[typeIdx - 1].toUpperCase();
+    const amountToken = cols[typeIdx + 1];
+    const amount = toNumberLoose(amountToken);
+
+    if (!Number.isFinite(amount)) {
+      diags.push({ line, reason: `Amount not numeric: "${amountToken}"` });
+      continue;
+    }
+
+    // id and uid are usually first two columns; if missing, leave blank
+    const id = cols[0] || "";
+    const uid = cols[1] || "";
+
+    // symbol: search tokens after amount for first SYMBOL-like token
     let symbol = "";
-    if (symbolCandidate && SYMBOL_RE.test(symbolCandidate)) symbol = symbolCandidate;
+    for (let i = typeIdx + 2; i < cols.length; i++) {
+      const tok = cols[i].toUpperCase();
+      if (SYMBOL_RE.test(tok)) {
+        symbol = tok;
+        break;
+      }
+    }
 
-    const extra = cols.slice(7).join(" ").trim();
+    // extra: whatever remains after symbol onward (join) OR last chunk(s)
+    const extra = cols.slice(typeIdx + 2).join(" ");
 
-    rows.push({ id, uid, asset, type, amount, time: when, symbol, extra, raw: line });
+    rows.push({
+      id,
+      uid,
+      asset,
+      type,
+      amount,
+      time,
+      symbol,
+      extra,
+      raw: line,
+    });
   }
-  return rows;
+
+  return { rows, diags };
 }
 
 // ---------- Aggregation ----------
-type Totals = { pos: number; neg: number; net: number };
-
 function sumByAsset(rows: Row[]) {
-  const acc: Record<string, Totals> = {};
+  const acc: Record<string, { pos: number; neg: number; net: number }> = {};
   for (const r of rows) {
     const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
     if (r.amount >= 0) a.pos += r.amount;
@@ -120,7 +196,12 @@ function sumByAsset(rows: Row[]) {
   }
   return acc;
 }
-
+function onlyEvents(rows: Row[]) {
+  return rows.filter((r) => r.type.startsWith(EVENT_PREFIX));
+}
+function onlyNonEvents(rows: Row[]) {
+  return rows.filter((r) => !r.type.startsWith(EVENT_PREFIX));
+}
 function groupBySymbol(rows: Row[]) {
   const m = new Map<string, Row[]>();
   for (const r of rows) {
@@ -131,17 +212,9 @@ function groupBySymbol(rows: Row[]) {
   }
   return m;
 }
-
 function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
-  const out: {
-    symbol: string;
-    realizedByAsset: Record<string, Totals>;
-    fundingByAsset: Record<string, Totals>;
-    commByAsset: Record<string, Totals>;
-    insByAsset: Record<string, Totals>;
-  }[] = [];
-
+  const out: any[] = [];
   for (const [symbol, rs] of sym.entries()) {
     const realized = rs.filter((r) => r.type === "REALIZED_PNL");
     const funding = rs.filter((r) => r.type === "FUNDING_FEE");
@@ -160,13 +233,7 @@ function bySymbolSummary(nonEventRows: Row[]) {
   return out;
 }
 
-function onlyEvents(rows: Row[]) {
-  return rows.filter((r) => r.type.startsWith(EVENT_PREFIX));
-}
-function onlyNonEvents(rows: Row[]) {
-  return rows.filter((r) => !r.type.startsWith(EVENT_PREFIX));
-}
-
+// Group COIN_SWAP*, AUTO_EXCHANGE by exact second and optional id shard in extra
 function coinSwapGroups(rows: Row[]) {
   const swaps = rows.filter((r) => SWAP_TYPES.has(r.type));
   const map = new Map<string, Row[]>();
@@ -178,35 +245,33 @@ function coinSwapGroups(rows: Row[]) {
     map.set(key, g);
   }
 
-  const lines: { time: string; kind: string; text: string }[] = [];
+  const lines = [];
   for (const [, group] of map.entries()) {
     const t = group[0].time;
     const kind = group.some((g) => g.type === "AUTO_EXCHANGE") ? "AUTO_EXCHANGE" : "COIN_SWAP";
-
     const byAsset = new Map<string, number>();
     for (const g of group) {
       byAsset.set(g.asset, (byAsset.get(g.asset) || 0) + g.amount);
     }
-    const negatives: string[] = [];
-    const positives: string[] = [];
+    const negatives: { asset: string; amt: number }[] = [];
+    const positives: { asset: string; amt: number }[] = [];
     for (const [asset, amt] of byAsset.entries()) {
-      if (amt < 0) negatives.push(`${fmtSigned(amt)} ${asset}`);
-      if (amt > 0) positives.push(`${fmtSigned(amt)} ${asset}`);
+      if (amt < 0) negatives.push({ asset, amt });
+      if (amt > 0) positives.push({ asset, amt });
     }
-    const left = negatives.join(", ") || "0";
-    const right = positives.join(", ") || "0";
+    const left = negatives.map((x) => `${fmtSigned(x.amt)} ${x.asset}`).join(", ") || "0";
+    const right = positives.map((x) => `${fmtSigned(x.amt)} ${x.asset}`).join(", ") || "0";
     const text = `${t} (UTC+0) → ${left} → ${right} (${kind})`;
-    lines.push({ time: t, kind, text });
+    lines.push({ time: t, kind, text, negatives, positives });
   }
   lines.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   return lines;
 }
 
 function sectionCopy(text: string) {
-  if (!navigator.clipboard) return alert("Clipboard API not available");
+  if (!navigator.clipboard) return alert("Clipboard API not available in this browser");
   navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
 }
-
 function downloadCsv(filename: string, rows: any[]) {
   const blob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
@@ -219,30 +284,38 @@ function downloadCsv(filename: string, rows: any[]) {
 
 // ---------- UI ----------
 export default function App() {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState<string>("");
   const [rows, setRows] = useState<Row[]>([]);
-  const [showRaw, setShowRaw] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string>("");
+  const [showRaw, setShowRaw] = useState<boolean>(false);
+  const [showDiag, setShowDiag] = useState<boolean>(false);
+  const [diags, setDiags] = useState<ParseDiag[]>([]);
   const pasteRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const parsed = useMemo(() => rows, [rows]);
-  const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
-  const events = useMemo(() => onlyEvents(parsed), [parsed]);
+  const nonEvent = useMemo(() => onlyNonEvents(rows), [rows]);
+  const events = useMemo(() => onlyEvents(rows), [rows]);
 
-  const realizedNonEvent = useMemo(() => nonEvent.filter((r) => r.type === "REALIZED_PNL"), [nonEvent]);
-  const funding = useMemo(() => parsed.filter((r) => r.type === "FUNDING_FEE"), [parsed]);
-  const commission = useMemo(() => parsed.filter((r) => r.type === "COMMISSION"), [parsed]);
-  const insurance = useMemo(
-    () => parsed.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE"),
-    [parsed]
+  const realizedNonEvent = useMemo(
+    () => nonEvent.filter((r) => r.type === "REALIZED_PNL"),
+    [nonEvent]
   );
-  const transfers = useMemo(() => parsed.filter((r) => r.type === "TRANSFER"), [parsed]);
-  const swaps = useMemo(() => coinSwapGroups(parsed), [parsed]);
+  const funding = useMemo(() => rows.filter((r) => r.type === "FUNDING_FEE"), [rows]);
+  const commission = useMemo(
+    () => rows.filter((r) => r.type === "COMMISSION"),
+    [rows]
+  );
+  const insurance = useMemo(
+    () => rows.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE"),
+    [rows]
+  );
+  const transfers = useMemo(() => rows.filter((r) => r.type === "TRANSFER"), [rows]);
+  const swaps = useMemo(() => coinSwapGroups(rows), [rows]);
 
   const otherTypes = useMemo(() => {
     const set = new Set([...KNOWN_TYPES]);
-    return parsed.filter((r) => !set.has(r.type) && !r.type.startsWith(EVENT_PREFIX));
-  }, [parsed]);
+    const out = rows.filter((r) => !set.has(r.type) && !r.type.startsWith(EVENT_PREFIX));
+    return out;
+  }, [rows]);
 
   const realizedByAsset = useMemo(() => sumByAsset(realizedNonEvent), [realizedNonEvent]);
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
@@ -254,14 +327,14 @@ export default function App() {
 
   const onParse = () => {
     setError("");
-    try {
-      const rs = parseBalanceLog(input);
-      if (!rs.length) throw new Error("No valid rows detected. Paste the Balance Log with dates.");
-      setRows(rs);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    const { rows: rs, diags } = parseBalanceLog(input || "");
+    setDiags(diags);
+    if (!rs.length) {
       setRows([]);
+      setError("No valid rows detected. Check Diagnostics for reasons.");
+      return;
     }
+    setRows(rs);
   };
 
   const onPasteAndParse = async () => {
@@ -282,8 +355,10 @@ export default function App() {
 
   const copyOverall = () => {
     const lines: string[] = [];
-    lines.push("FD Summary (UTC+0)", "");
+    lines.push("FD Summary (UTC+0)");
+    lines.push("");
 
+    // Realized PnL per asset (non-event)
     if (Object.keys(realizedByAsset).length) {
       lines.push("Realized PnL (Futures, not Events):");
       for (const [asset, v] of Object.entries(realizedByAsset)) {
@@ -292,7 +367,8 @@ export default function App() {
       }
       lines.push("");
     }
-    const pushRPN = (title: string, map: Record<string, Totals>) => {
+
+    const pushRPN = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
       if (!Object.keys(map).length) return;
       lines.push(title + ":");
       for (const [asset, v] of Object.entries(map)) {
@@ -308,11 +384,12 @@ export default function App() {
     pushRPN("Transfers (General)", transfersByAsset);
 
     if (otherTypes.length) {
-      const byTypeThenAsset: Record<string, Record<string, Totals>> = {};
+      const byTypeThenAsset: Record<string, Record<string, { pos: number; neg: number; net: number }>> = {};
       for (const r of otherTypes) {
         byTypeThenAsset[r.type] ??= {};
         const a = (byTypeThenAsset[r.type][r.asset] ??= { pos: 0, neg: 0, net: 0 });
-        if (r.amount >= 0) a.pos += r.amount; else a.neg += Math.abs(r.amount);
+        if (r.amount >= 0) a.pos += r.amount;
+        else a.neg += Math.abs(r.amount);
         a.net += r.amount;
       }
       lines.push("Other Types:");
@@ -338,198 +415,273 @@ export default function App() {
 
   const copyRaw = () => {
     if (!rows.length) return;
-    const lines: string[] = [];
     const headers = ["time", "type", "asset", "amount", "symbol", "id", "uid", "extra"];
-    lines.push(headers.join("\t"));
-    for (const r of rows) lines.push([r.time, r.type, r.asset, r.amount, r.symbol, r.id, r.uid, r.extra].join("\t"));
-    sectionCopy(lines.join("\n"));
+    const tsv = [headers.join("\t"), ...rows.map((r) =>
+      [r.time, r.type, r.asset, r.amount, r.symbol, r.id, r.uid, r.extra].join("\t")
+    )].join("\n");
+    sectionCopy(tsv);
   };
 
   return (
-    <div className="container">
-      <h1>Balance Log Analyzer</h1>
-      <p className="muted">UTC+0 • Paste your full Balance Log and click Parse. “Copy Summary” excludes Coin Swaps/Auto-Exchange.</p>
+    <div className="min-h-screen bg-white text-gray-900">
+      <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+        <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">Balance Log Analyzer</h1>
+            <p className="text-sm text-gray-600">
+              UTC+0 • Paste your full Balance Log and click Parse. The main Copy excludes coin swaps/auto-exchange.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button className="px-3 py-2 rounded-lg bg-black text-white" onClick={onPasteAndParse}>Paste &amp; Parse</button>
+            <button className="px-3 py-2 rounded-lg bg-gray-900 text-white" onClick={onParse}>Parse</button>
+            <button className="px-3 py-2 rounded-lg border" onClick={() => { setInput(""); setRows([]); setError(""); setDiags([]); }}>Clear</button>
+            <button className="px-3 py-2 rounded-lg border" onClick={() => setShowDiag((s) => !s)}>{showDiag ? "Hide Diagnostics" : "Show Diagnostics"}</button>
+          </div>
+        </header>
 
-      <div className="btn-row" style={{ marginTop: 12 }}>
-        <button className="btn" onClick={onPasteAndParse}>Paste & Parse</button>
-        <button className="btn" onClick={onParse}>Parse</button>
-        <button className="btn secondary" onClick={() => { setInput(""); setRows([]); setError(""); }}>Clear</button>
-      </div>
+        {/* Paste Area */}
+        <section className="space-y-2">
+          <label className="text-sm font-semibold">Paste Balance Log Here</label>
+          <textarea
+            ref={pasteRef}
+            placeholder="Paste the entire Balance Log page (Ctrl/⌘+A then Ctrl/⌘+C)"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            className="w-full h-40 p-3 border rounded-lg font-mono text-sm"
+          />
+          {error && <p className="text-red-600 text-sm">{error}</p>}
+        </section>
 
-      <div className="card">
-        <div className="muted" style={{ marginBottom: 6 }}>Paste Balance Log Here</div>
-        <textarea
-          ref={pasteRef}
-          rows={8}
-          placeholder="Paste the entire Balance Log page (Ctrl/⌘+A then Ctrl/⌘+C)"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-        />
-        {error && <div style={{ color: "crimson", marginTop: 6 }}>{error}</div>}
-      </div>
+        {/* Diagnostics */}
+        {showDiag && (
+          <section className="rounded-xl border p-4">
+            <h3 className="font-semibold mb-2">Diagnostics</h3>
+            <p className="text-xs text-gray-600 mb-2">
+              If lines failed to parse, reasons will show here (kept private, not included in copies).
+            </p>
+            {diags.length ? (
+              <div className="max-h-64 overflow-auto text-xs font-mono space-y-1">
+                {diags.slice(0, 200).map((d, i) => (
+                  <div key={i} className="border-b pb-1">
+                    <div className="text-red-700">• {d.reason}</div>
+                    <div className="text-gray-700 truncate">{d.line}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-600">No diagnostics yet.</p>
+            )}
+          </section>
+        )}
 
-      {!!rows.length && (
-        <>
-          <div className="card">
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <h2 style={{ margin:0 }}>Summary</h2>
-              <button className="btn secondary" onClick={copyOverall}>Copy Summary (no Swaps)</button>
+        {/* Summary & Actions */}
+        {!!rows.length && (
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold">Summary</h2>
+              <div className="flex gap-2">
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={copyOverall}>
+                  Copy Summary (no Swaps)
+                </button>
+              </div>
             </div>
 
-            <div className="card" style={{ marginTop: 12 }}>
-              <h3 style={{ marginTop:0 }}>Realized PnL (Futures, not Events)</h3>
+            {/* Realized PnL */}
+            <div className="rounded-xl border p-4">
+              <h3 className="font-semibold mb-2">Realized PnL (Futures, not Events)</h3>
               {Object.keys(realizedByAsset).length ? (
-                <ul>
+                <ul className="grid sm:grid-cols-2 gap-2 text-sm">
                   {Object.entries(realizedByAsset).map(([asset, v]) => (
-                    <li key={asset} className="nums">
-                      <strong>{asset}</strong> — Total Profit: +{fmtAbs(v.pos)} • Total Loss: -{fmtAbs(v.neg)}
+                    <li key={asset} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+                      <span className="font-medium">{asset}</span>
+                      <span className="tabular-nums">
+                        Total Profit: +{fmtAbs(v.pos)} • Total Loss: -{fmtAbs(v.neg)}
+                      </span>
                     </li>
                   ))}
                 </ul>
-              ) : <div className="muted">No Realized PnL found.</div>}
+              ) : (
+                <p className="text-sm text-gray-600">No Realized PnL found.</p>
+              )}
             </div>
 
-            <div className="grid two">
+            {/* Fees */}
+            <div className="grid md:grid-cols-2 gap-4">
               <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
               <RpnCard title="Funding Fees" map={fundingByAsset} />
               <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
               <RpnCard title="Transfers (General)" map={transfersByAsset} />
             </div>
 
-            <div className="card">
-              <h3 style={{ marginTop:0 }}>Other Types</h3>
-              {otherTypes.length ? <OtherTypesBlock rows={otherTypes} /> : <div className="muted">None</div>}
+            {/* Other Types */}
+            <div className="rounded-xl border p-4">
+              <h3 className="font-semibold mb-2">Other Types</h3>
+              {otherTypes.length ? (
+                <OtherTypesBlock rows={otherTypes} />
+              ) : (
+                <p className="text-sm text-gray-600">None</p>
+              )}
             </div>
 
-            <div className="card">
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <h3 style={{ marginTop:0 }}>Coin Swaps & Auto-Exchange (separate copy)</h3>
-                <button className="btn secondary" onClick={copySwaps}>Copy Coin Swaps</button>
+            {/* Coin Swaps & Auto-Exchange */}
+            <div className="rounded-xl border p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="font-semibold">Coin Swaps &amp; Auto-Exchange (separate copy)</h3>
+                <button className="px-3 py-2 rounded-lg border" onClick={copySwaps}>Copy Coin Swaps</button>
               </div>
               {swaps.length ? (
-                <ul>
-                  {swaps.map((s, i) => <li key={i} className="nums">{s.text}</li>)}
+                <ul className="list-disc pl-5 text-sm">
+                  {swaps.map((s, i) => (
+                    <li key={i} className="tabular-nums">{s.text}</li>
+                  ))}
                 </ul>
-              ) : <div className="muted">None</div>}
+              ) : (
+                <p className="text-sm text-gray-600">None</p>
+              )}
             </div>
 
-            <div className="card">
-              <h3 style={{ marginTop:0 }}>By Symbol (Futures, not Events)</h3>
+            {/* By Symbol */}
+            <div className="rounded-xl border p-4">
+              <h3 className="font-semibold mb-2">By Symbol (Futures, not Events)</h3>
               {symbolBlocks.length ? (
-                <div style={{ overflowX:"auto" }}>
-                  <table>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
                     <thead>
-                      <tr>
-                        <th>Symbol</th>
-                        <th>Realized PnL</th>
-                        <th>Funding</th>
-                        <th>Trading Fees</th>
-                        <th>Insurance</th>
+                      <tr className="text-left border-b">
+                        <th className="py-2 pr-4">Symbol</th>
+                        <th className="py-2 pr-4">Realized PnL</th>
+                        <th className="py-2 pr-4">Funding</th>
+                        <th className="py-2 pr-4">Trading Fees</th>
+                        <th className="py-2 pr-4">Insurance</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {symbolBlocks.map((b) => (
-                        <tr key={b.symbol}>
-                          <td><strong>{b.symbol}</strong></td>
-                          <td className="nums">{fmtAssetPairs(b.realizedByAsset)}</td>
-                          <td className="nums">{fmtAssetPairs(b.fundingByAsset)}</td>
-                          <td className="nums">{fmtAssetPairs(b.commByAsset)}</td>
-                          <td className="nums">{fmtAssetPairs(b.insByAsset)}</td>
+                      {symbolBlocks.map((b: any) => (
+                        <tr key={b.symbol} className="border-b last:border-b-0">
+                          <td className="py-2 pr-4 font-medium">{b.symbol}</td>
+                          <td className="py-2 pr-4 tabular-nums">{fmtAssetPairs(b.realizedByAsset)}</td>
+                          <td className="py-2 pr-4 tabular-nums">{fmtAssetPairs(b.fundingByAsset)}</td>
+                          <td className="py-2 pr-4 tabular-nums">{fmtAssetPairs(b.commByAsset)}</td>
+                          <td className="py-2 pr-4 tabular-nums">{fmtAssetPairs(b.insByAsset)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-              ) : <div className="muted">No symbol activity.</div>}
+              ) : (
+                <p className="text-sm text-gray-600">No symbol activity.</p>
+              )}
             </div>
 
-            <div className="card">
-              <h3 style={{ marginTop:0 }}>Event Contracts (Separate Product)</h3>
+            {/* Events */}
+            <div className="rounded-xl border p-4">
+              <h3 className="font-semibold mb-2">Event Contracts (Separate Product)</h3>
               <EventSummary rows={events} />
             </div>
-          </div>
+          </section>
+        )}
 
-          <div className="card">
-            <details open={false}>
-              <summary>Show Raw Parsed Table (Excel-like)</summary>
-              <div className="btn-row" style={{ marginTop: 8 }}>
-                <button className="btn secondary" onClick={() => copyRaw()}>Copy Table (TSV)</button>
-                <button className="btn secondary" onClick={() => downloadCsv("balance_log.csv", rows as any)}>Download CSV</button>
-              </div>
-              <div style={{ overflowX:"auto", marginTop: 8 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      {["time","type","asset","amount","symbol","id","uid","extra"].map((h) => (
-                        <th key={h}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((r, i) => (
-                      <tr key={i}>
-                        <td>{r.time}</td>
-                        <td>{r.type}</td>
-                        <td>{r.asset}</td>
-                        <td className="nums">{fmtSigned(r.amount)}</td>
-                        <td>{r.symbol}</td>
-                        <td>{r.id}</td>
-                        <td>{r.uid}</td>
-                        <td>{r.extra}</td>
+        {/* Raw Parsed Table (hidden by default) */}
+        {!!rows.length && (
+          <section className="rounded-xl border">
+            <button
+              className="w-full text-left px-4 py-3 font-semibold border-b bg-gray-50"
+              onClick={() => setShowRaw((s) => !s)}
+            >
+              {showRaw ? "▾ Hide Raw Parsed Table (Excel-like)" : "▸ Show Raw Parsed Table (Excel-like)"}
+            </button>
+            {showRaw && (
+              <div className="p-4 space-y-3">
+                <div className="flex gap-2">
+                  <button className="px-3 py-2 rounded-lg border" onClick={copyRaw}>Copy Table (TSV)</button>
+                  <button className="px-3 py-2 rounded-lg border" onClick={() => downloadCsv("balance_log.csv", rows as any[])}>
+                    Download CSV
+                  </button>
+                </div>
+                <div className="overflow-auto border rounded-lg">
+                  <table className="min-w-[900px] w-full text-xs font-mono">
+                    <thead className="bg-gray-50">
+                      <tr className="text-left border-b">
+                        {["time","type","asset","amount","symbol","id","uid","extra"].map((h) => (
+                          <th key={h} className="py-2 px-2">{h}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {rows.map((r, i) => (
+                        <tr key={i} className="border-b last:border-b-0">
+                          <td className="py-1 px-2 whitespace-nowrap">{r.time}</td>
+                          <td className="py-1 px-2 whitespace-nowrap">{r.type}</td>
+                          <td className="py-1 px-2 whitespace-nowrap">{r.asset}</td>
+                          <td className="py-1 px-2 whitespace-nowrap tabular-nums">{fmtSigned(r.amount)}</td>
+                          <td className="py-1 px-2 whitespace-nowrap">{r.symbol}</td>
+                          <td className="py-1 px-2 whitespace-nowrap">{r.id}</td>
+                          <td className="py-1 px-2 whitespace-nowrap">{r.uid}</td>
+                          <td className="py-1 px-2">{r.extra}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </details>
-          </div>
-        </>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Small UI helpers ----------
+function RpnCard({ title, map }: { title: string; map: Record<string, { pos: number; neg: number; net: number }> }) {
+  return (
+    <div className="rounded-xl border p-4">
+      <h3 className="font-semibold mb-2">{title}</h3>
+      {Object.keys(map).length ? (
+        <ul className="space-y-1 text-sm">
+          {Object.entries(map).map(([asset, v]) => (
+            <li key={asset} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+              <span className="font-medium">{asset}</span>
+              <span className="tabular-nums">
+                Received: +{fmtAbs(v.pos)} • Paid: -{fmtAbs(v.neg)} • Net: {fmtSigned(v.net)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-gray-600">None</p>
       )}
     </div>
   );
 }
 
-// ---- Small UI helpers
-function RpnCard({ title, map }: { title: string; map: Record<string, Totals> }) {
-  const has = Object.keys(map).length > 0;
-  return (
-    <div className="card">
-      <h3 style={{ marginTop:0 }}>{title}</h3>
-      {has ? (
-        <ul>
-          {Object.entries(map).map(([asset, v]) => (
-            <li key={asset} className="nums">
-              <strong>{asset}</strong> — Received: +{fmtAbs(v.pos)} • Paid: -{fmtAbs(v.neg)} • Net: {fmtSigned(v.net)}
-            </li>
-          ))}
-        </ul>
-      ) : <div className="muted">None</div>}
-    </div>
-  );
-}
-function fmtAssetPairs(map: Record<string, Totals>) {
+function fmtAssetPairs(map: Record<string, { pos: number; neg: number }>) {
   const parts: string[] = [];
   for (const [asset, v] of Object.entries(map)) {
     parts.push(`+${fmtAbs(v.pos)} / -${fmtAbs(v.neg)} ${asset}`);
   }
   return parts.length ? parts.join(", ") : "–";
 }
+
 function EventSummary({ rows }: { rows: Row[] }) {
   const orders = rows.filter((r) => r.type === "EVENT_CONTRACTS_ORDER");
   const payouts = rows.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT");
   const byOrder = sumByAsset(orders);
   const byPayout = sumByAsset(payouts);
   const assets = Array.from(new Set([...Object.keys(byOrder), ...Object.keys(byPayout)])).sort();
-  if (!assets.length) return <div className="muted">None</div>;
+
+  if (!assets.length) return <p className="text-sm text-gray-600">None</p>;
+
   return (
-    <div style={{ overflowX:"auto" }}>
-      <table>
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm">
         <thead>
-          <tr>
-            <th>Asset</th>
-            <th>Payout (Received)</th>
-            <th>Orders (Paid)</th>
-            <th>Net</th>
+          <tr className="text-left border-b">
+            <th className="py-2 pr-4">Asset</th>
+            <th className="py-2 pr-4">Payout (Received)</th>
+            <th className="py-2 pr-4">Orders (Paid)</th>
+            <th className="py-2 pr-4">Net</th>
           </tr>
         </thead>
         <tbody>
@@ -538,16 +690,49 @@ function EventSummary({ rows }: { rows: Row[] }) {
             const o = byOrder[asset] || { pos: 0, neg: 0, net: 0 };
             const net = (p.net || 0) + (o.net || 0);
             return (
-              <tr key={asset}>
-                <td><strong>{asset}</strong></td>
-                <td className="nums">+{fmtAbs(p.pos)}</td>
-                <td className="nums">-{fmtAbs(o.neg)}</td>
-                <td className="nums">{fmtSigned(net)}</td>
+              <tr key={asset} className="border-b last:border-b-0">
+                <td className="py-2 pr-4 font-medium">{asset}</td>
+                <td className="py-2 pr-4 tabular-nums">+{fmtAbs(p.pos)}</td>
+                <td className="py-2 pr-4 tabular-nums">-{fmtAbs(o.neg)}</td>
+                <td className="py-2 pr-4 tabular-nums">{fmtSigned(net)}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function OtherTypesBlock({ rows }: { rows: Row[] }) {
+  const byType = new Map<string, Row[]>();
+  for (const r of rows) {
+    const g = byType.get(r.type) || [];
+    g.push(r);
+    byType.set(r.type, g);
+  }
+  const keys = Array.from(byType.keys()).sort();
+
+  return (
+    <div className="space-y-3">
+      {keys.map((t) => {
+        const byAsset = sumByAsset(byType.get(t) || []);
+        return (
+          <div key={t} className="rounded-lg border p-3">
+            <div className="font-semibold mb-1 text-sm">{t}</div>
+            <ul className="grid sm:grid-cols-2 gap-2 text-sm">
+              {Object.entries(byAsset).map(([asset, v]) => (
+                <li key={asset} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+                  <span className="font-medium">{asset}</span>
+                  <span className="tabular-nums">
+                    Received: +{fmtAbs(v.pos)} • Paid: -{fmtAbs(v.neg)} • Net: {fmtSigned(v.net)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
     </div>
   );
 }
