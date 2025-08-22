@@ -3,11 +3,11 @@ import React, { useMemo, useRef, useState } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * - Summary cards (includes “Other Types (non-event)” inside the summary area)
- * - By Symbol with per-row Copy / Save PNG (sticky Actions)
- * - Coin Swaps tab split: Auto-Exchange vs Coin Swaps
- * - “Save Symbols PNG” exports the whole symbols table as one tall PNG
- * - Full Response preview/edit modal
+ * - Summary cards (with Other Types in the summary area)
+ * - By Symbol with per-row Copy / Save PNG and one-click Save All PNG
+ * - Coin Swaps split: Auto-Exchange vs Coin Swaps
+ * - Full Response preview/edit includes Transfers, GridBot Transfers, and Other Types
+ * - Zero-suppression EPS = 1e-12, all times UTC+0
  */
 
 type Row = {
@@ -25,25 +25,47 @@ type Row = {
 const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0
 const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB)$/;
 
-const SWAP_TYPES = new Set(["COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW", "AUTO_EXCHANGE"]);
+const TYPE = {
+  REALIZED_PNL: "REALIZED_PNL",
+  FUNDING_FEE: "FUNDING_FEE",
+  COMMISSION: "COMMISSION",
+  INSURANCE_CLEAR: "INSURANCE_CLEAR",
+  LIQUIDATION_FEE: "LIQUIDATION_FEE",
+  REFERRAL_KICKBACK: "REFERRAL_KICKBACK",
+  TRANSFER: "TRANSFER",
+  GRIDBOT_TRANSFER: "STRATEGY_UMFUTURES_TRANSFER",
+  COIN_SWAP_DEPOSIT: "COIN_SWAP_DEPOSIT",
+  COIN_SWAP_WITHDRAW: "COIN_SWAP_WITHDRAW",
+  AUTO_EXCHANGE: "AUTO_EXCHANGE",
+  EVENT_ORDER: "EVENT_CONTRACTS_ORDER",
+  EVENT_PAYOUT: "EVENT_CONTRACTS_PAYOUT",
+};
+
 const EVENT_PREFIX = "EVENT_CONTRACTS_";
-const EVENT_KNOWN_CORE = new Set(["EVENT_CONTRACTS_ORDER", "EVENT_CONTRACTS_PAYOUT"]);
-const KNOWN_TYPES = new Set([
-  "REALIZED_PNL",
-  "FUNDING_FEE",
-  "COMMISSION",
-  "INSURANCE_CLEAR",
-  "LIQUIDATION_FEE",
-  "REFERRAL_KICKBACK",
-  "TRANSFER",
-  ...Array.from(SWAP_TYPES),
+const EVENT_KNOWN_CORE = new Set([TYPE.EVENT_ORDER, TYPE.EVENT_PAYOUT]);
+
+const KNOWN_TYPES = new Set<string>([
+  TYPE.REALIZED_PNL,
+  TYPE.FUNDING_FEE,
+  TYPE.COMMISSION,
+  TYPE.INSURANCE_CLEAR,
+  TYPE.LIQUIDATION_FEE,
+  TYPE.REFERRAL_KICKBACK,
+  TYPE.TRANSFER,
+  TYPE.GRIDBOT_TRANSFER,
+  TYPE.COIN_SWAP_DEPOSIT,
+  TYPE.COIN_SWAP_WITHDRAW,
+  TYPE.AUTO_EXCHANGE,
+  TYPE.EVENT_ORDER,
+  TYPE.EVENT_PAYOUT,
 ]);
 
 const EPS = 1e-12;
 
 /* ---------- utils ---------- */
+const abs = (x: number) => Math.abs(Number(x) || 0);
 function fmtAbs(x: number, maxDp = 8) {
-  const v = Math.abs(Number(x) || 0);
+  const v = abs(x);
   const s = v.toFixed(maxDp);
   return s.replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
 }
@@ -64,7 +86,7 @@ function toCsv<T extends object>(rows: T[]) {
   return [headers.join(","), ...body].join("\n");
 }
 const sumMapMagnitude = (m: Record<string, { pos: number; neg: number }>) =>
-  Object.values(m).reduce((acc, v) => acc + Math.abs(v.pos) + Math.abs(v.neg), 0);
+  Object.values(m).reduce((acc, v) => acc + abs(v.pos) + abs(v.neg), 0);
 
 /* ---------- parsing ---------- */
 function splitColumns(line: string) {
@@ -137,7 +159,7 @@ function sumByAsset(rows: Row[]) {
   for (const r of rows) {
     const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
     if (r.amount >= 0) a.pos += r.amount;
-    else a.neg += Math.abs(r.amount);
+    else a.neg += abs(r.amount);
     a.net += r.amount;
   }
   return acc;
@@ -167,10 +189,10 @@ function bySymbolSummary(nonEventRows: Row[]) {
   }> = [];
 
   for (const [symbol, rs] of sym.entries()) {
-    const realized = rs.filter((r) => r.type === "REALIZED_PNL");
-    const funding = rs.filter((r) => r.type === "FUNDING_FEE");
-    const comm = rs.filter((r) => r.type === "COMMISSION");
-    const ins = rs.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
+    const realized = rs.filter((r) => r.type === TYPE.REALIZED_PNL);
+    const funding = rs.filter((r) => r.type === TYPE.FUNDING_FEE);
+    const comm = rs.filter((r) => r.type === TYPE.COMMISSION);
+    const ins = rs.filter((r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE);
 
     const realizedByAsset = sumByAsset(realized);
     const fundingByAsset = sumByAsset(funding);
@@ -197,11 +219,16 @@ function bySymbolSummary(nonEventRows: Row[]) {
   return out;
 }
 
-function coinSwapGroups(rows: Row[]) {
-  const swaps = rows.filter((r) => SWAP_TYPES.has(r.type));
-  const map = new Map<string, Row[]>();
+/* --- swap-grouping split strictly by kind --- */
+type SwapKind = "COIN_SWAP" | "AUTO_EXCHANGE";
+function groupSwaps(rows: Row[], kind: SwapKind) {
+  const isCoin = (t: string) => t === TYPE.COIN_SWAP_DEPOSIT || t === TYPE.COIN_SWAP_WITHDRAW;
+  const filtered = rows.filter((r) =>
+    kind === "COIN_SWAP" ? isCoin(r.type) : r.type === TYPE.AUTO_EXCHANGE
+  );
 
-  for (const r of swaps) {
+  const map = new Map<string, Row[]>();
+  for (const r of filtered) {
     const idHint = (r.extra && r.extra.split("@")[0]) || "";
     const key = `${r.time}|${idHint}`;
     const g = map.get(key) || [];
@@ -209,7 +236,7 @@ function coinSwapGroups(rows: Row[]) {
     map.set(key, g);
   }
 
-  const lines: { time: string; kind: "AUTO_EXCHANGE" | "COIN_SWAP"; text: string }[] = [];
+  const lines: { time: string; text: string }[] = [];
   for (const [, group] of map.entries()) {
     const t = group[0].time;
     const byAsset = new Map<string, number>();
@@ -223,7 +250,6 @@ function coinSwapGroups(rows: Row[]) {
     }
     lines.push({
       time: t,
-      kind: group.some((g) => g.type === "AUTO_EXCHANGE") ? "AUTO_EXCHANGE" : "COIN_SWAP",
       text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}`,
     });
   }
@@ -410,16 +436,40 @@ function pairsToText(map: Record<string, { pos: number; neg: number }>) {
   return entries.map(([a, v]) => `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`).join("; ");
 }
 
-/* ---------- PNG helpers (no deps) ---------- */
+/* ---------- PNG helpers (no external deps) ---------- */
+function stripStickyStyles(el: HTMLElement) {
+  el.querySelectorAll<HTMLElement>(".sticky").forEach((n) => {
+    n.style.position = "relative";
+    n.style.right = "auto";
+    n.style.left = "auto";
+    n.style.boxShadow = "none";
+    n.classList.remove("sticky");
+  });
+}
+
 async function elementToPng(el: HTMLElement, filename: string) {
+  // Clone to off-screen sandbox
   const width = Math.ceil(el.scrollWidth);
   const height = Math.ceil(el.scrollHeight);
+
+  const sandbox = document.createElement("div");
+  sandbox.style.position = "fixed";
+  sandbox.style.left = "-99999px";
+  sandbox.style.top = "0";
+  sandbox.style.width = width + "px";
+  sandbox.style.height = height + "px";
+  sandbox.style.background = "#fff";
+  const clone = el.cloneNode(true) as HTMLElement;
+  stripStickyStyles(clone);
+  clone.style.width = width + "px";
+  clone.style.height = "auto";
+  (clone.style as any).overflow = "visible";
+  sandbox.appendChild(clone);
+  document.body.appendChild(sandbox);
+
+  // foreignObject → img → canvas
   const svgNS = "http://www.w3.org/2000/svg";
   const xhtmlNS = "http://www.w3.org/1999/xhtml";
-
-  const clone = el.cloneNode(true) as HTMLElement;
-  clone.style.margin = "0";
-  clone.style.background = "#fff";
 
   const wrapper = document.createElement("div");
   wrapper.setAttribute("xmlns", xhtmlNS);
@@ -465,6 +515,8 @@ async function elementToPng(el: HTMLElement, filename: string) {
   a.href = pngUrl;
   a.download = filename;
   a.click();
+
+  document.body.removeChild(sandbox);
 }
 
 /* ---------- main app ---------- */
@@ -483,35 +535,53 @@ export default function App() {
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
   const events = useMemo(() => onlyEvents(parsed), [parsed]);
 
-  const realizedNonEvent = useMemo(() => nonEvent.filter((r) => r.type === "REALIZED_PNL"), [nonEvent]);
-  const commission = useMemo(() => parsed.filter((r) => r.type === "COMMISSION"), [parsed]);
-  const referralKick = useMemo(() => parsed.filter((r) => r.type === "REFERRAL_KICKBACK"), [parsed]);
-  const funding = useMemo(() => parsed.filter((r) => r.type === "FUNDING_FEE"), [parsed]);
+  const realized = useMemo(() => nonEvent.filter((r) => r.type === TYPE.REALIZED_PNL), [nonEvent]);
+  const commission = useMemo(() => parsed.filter((r) => r.type === TYPE.COMMISSION), [parsed]);
+  const referralKick = useMemo(() => parsed.filter((r) => r.type === TYPE.REFERRAL_KICKBACK), [parsed]);
+  const funding = useMemo(() => parsed.filter((r) => r.type === TYPE.FUNDING_FEE), [parsed]);
   const insurance = useMemo(
-    () => parsed.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE"),
+    () => parsed.filter((r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE),
     [parsed]
   );
-  const transfers = useMemo(() => parsed.filter((r) => r.type === "TRANSFER"), [parsed]);
+  const transfers = useMemo(() => parsed.filter((r) => r.type === TYPE.TRANSFER), [parsed]);
+  const gridbotTransfers = useMemo(() => parsed.filter((r) => r.type === TYPE.GRIDBOT_TRANSFER), [parsed]);
 
-  const swapLines = useMemo(() => coinSwapGroups(parsed), [parsed]);
-  const swapAuto = swapLines.filter((s) => s.kind === "AUTO_EXCHANGE");
-  const swapCoin = swapLines.filter((s) => s.kind === "COIN_SWAP");
+  // swaps split
+  const coinSwapLines = useMemo(() => groupSwaps(parsed, "COIN_SWAP"), [parsed]);
+  const autoExLines = useMemo(() => groupSwaps(parsed, "AUTO_EXCHANGE"), [parsed]);
 
+  // Other types (non-event, excluding known)
   const otherTypesNonEvent = useMemo(
     () => parsed.filter((r) => !KNOWN_TYPES.has(r.type) && !r.type.startsWith(EVENT_PREFIX)),
     [parsed]
   );
   const eventOther = useMemo(() => events.filter((r) => !EVENT_KNOWN_CORE.has(r.type)), [events]);
 
-  const realizedByAsset = useMemo(() => sumByAsset(realizedNonEvent), [realizedNonEvent]);
+  // Per-asset summaries
+  const realizedByAsset = useMemo(() => sumByAsset(realized), [realized]);
   const commissionByAsset = useMemo(() => sumByAsset(commission), [commission]);
   const referralByAsset = useMemo(() => sumByAsset(referralKick), [referralKick]);
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
   const insuranceByAsset = useMemo(() => sumByAsset(insurance), [insurance]);
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
-  const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]); // filtered
+  const gridbotByAsset = useMemo(() => sumByAsset(gridbotTransfers), [gridbotTransfers]);
 
+  // For full response: aggregated assets for swaps (separately)
+  const coinSwapAggByAsset = useMemo(
+    () => sumByAsset(parsed.filter((r) => r.type === TYPE.COIN_SWAP_DEPOSIT || r.type === TYPE.COIN_SWAP_WITHDRAW)),
+    [parsed]
+  );
+  const autoExAggByAsset = useMemo(
+    () => sumByAsset(parsed.filter((r) => r.type === TYPE.AUTO_EXCHANGE)),
+    [parsed]
+  );
+
+  // Symbol table blocks (filtered: no-only-referral symbols)
+  const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
+
+  // Refs for PNG export
   const tableRef = useRef<HTMLTableElement | null>(null);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
 
   function runParse(tsv: string) {
     setError("");
@@ -545,24 +615,12 @@ export default function App() {
     navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
   }
 
+  /* ---------- Copy buttons ---------- */
   function copySummary() {
     const L: string[] = [];
     L.push("FD Summary (UTC+0)", "");
 
-    const pushPL = (title: string, map: Record<string, { pos: number; neg: number }>) => {
-      const keys = Object.keys(map);
-      if (!keys.length) return;
-      L.push(title + ":");
-      keys.forEach((asset) => {
-        const v = map[asset];
-        L.push(`  Total Profit ${asset}: +${fmtAbs(v.pos)}`);
-        L.push(`  Total Loss ${asset}: −${fmtAbs(v.neg)}`);
-      });
-      L.push("");
-    };
-    pushPL("Realized PnL (Futures, not Events)", realizedByAsset);
-
-    const pushRPN = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
+    const section = (title: string, map: Record<string, { pos: number; neg: number; net?: number }>) => {
       const keys = Object.keys(map);
       if (!keys.length) return;
       L.push(title + ":");
@@ -570,15 +628,17 @@ export default function App() {
         const v = map[asset];
         L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
         L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
-        L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
+        if (typeof v.net === "number") L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
       });
       L.push("");
     };
-    pushRPN("Trading Fees / Commission", commissionByAsset);
-    pushRPN("Referral Kickback", referralByAsset);
-    pushRPN("Funding Fees", fundingByAsset);
-    pushRPN("Insurance / Liquidation", insuranceByAsset);
-    pushRPN("Transfers (General)", transfersByAsset);
+    section("Realized PnL (Futures, not Events)", realizedByAsset);
+    section("Trading Fees / Commission", commissionByAsset);
+    section("Referral Kickback", referralByAsset);
+    section("Funding Fees", fundingByAsset);
+    section("Insurance / Liquidation", insuranceByAsset);
+    section("Transfers (General)", transfersByAsset);
+    if (Object.keys(gridbotByAsset).length) section("Futures GridBot Wallet Transfers", gridbotByAsset);
 
     if (otherTypesNonEvent.length) {
       const byType: Record<string, Row[]> = {};
@@ -596,6 +656,7 @@ export default function App() {
           });
         });
     }
+
     copyText(L.join("\n"));
   }
 
@@ -604,39 +665,56 @@ export default function App() {
 
     const collect = (pred: (r: Row) => boolean) => sumByAsset(rows.filter(pred));
 
-    const realized = collect((r) => r.type === "REALIZED_PNL");
-    const comm = collect((r) => r.type === "COMMISSION");
-    const refkick = collect((r) => r.type === "REFERRAL_KICKBACK");
-    const fund = collect((r) => r.type === "FUNDING_FEE");
-    const ins = collect((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
-    const swapsAgg = collect((r) => SWAP_TYPES.has(r.type));
-    const evOrder = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_ORDER"));
-    const evPay = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT"));
-    const transfer = collect((r) => r.type === "TRANSFER"); // included in totals only
+    const realizedAgg = collect((r) => r.type === TYPE.REALIZED_PNL);
+    const commAgg = collect((r) => r.type === TYPE.COMMISSION);
+    const refkickAgg = collect((r) => r.type === TYPE.REFERRAL_KICKBACK);
+    const fundAgg = collect((r) => r.type === TYPE.FUNDING_FEE);
+    const insAgg = collect((r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE);
+    const transferAgg = collect((r) => r.type === TYPE.TRANSFER);
+    const gridbotAgg = collect((r) => r.type === TYPE.GRIDBOT_TRANSFER);
+
+    const evOrder = sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER));
+    const evPay = sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT));
+
+    const otherByType: Record<string, { [asset: string]: { pos: number; neg: number; net: number } }> = {};
+    otherTypesNonEvent.forEach((r) => {
+      const bucket = (otherByType[r.type] = otherByType[r.type] || {});
+      const cur = (bucket[r.asset] = bucket[r.asset] || { pos: 0, neg: 0, net: 0 });
+      if (r.amount >= 0) cur.pos += r.amount; else cur.neg += abs(r.amount);
+      cur.net += r.amount;
+    });
+
+    const assets = new Set<string>([
+      ...Object.keys(realizedAgg),
+      ...Object.keys(commAgg),
+      ...Object.keys(refkickAgg),
+      ...Object.keys(fundAgg),
+      ...Object.keys(insAgg),
+      ...Object.keys(coinSwapAggByAsset),
+      ...Object.keys(autoExAggByAsset),
+      ...Object.keys(evOrder),
+      ...Object.keys(evPay),
+      ...Object.keys(transferAgg),
+      ...Object.keys(gridbotAgg),
+      ...Object.values(otherByType).flatMap((m) => Object.keys(m)),
+    ]);
 
     const total: Record<string, number> = {};
     const bump = (a: string, v: number) => (total[a] = (total[a] ?? 0) + v);
-    for (const [a, v] of Object.entries(realized)) bump(a, v.net);
-    for (const [a, v] of Object.entries(comm)) bump(a, v.net);
-    for (const [a, v] of Object.entries(refkick)) bump(a, v.net);
-    for (const [a, v] of Object.entries(fund)) bump(a, v.net);
-    for (const [a, v] of Object.entries(ins)) bump(a, v.net);
-    for (const [a, v] of Object.entries(swapsAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(realizedAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(commAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(refkickAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(fundAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(insAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(coinSwapAggByAsset)) bump(a, v.net);
+    for (const [a, v] of Object.entries(autoExAggByAsset)) bump(a, v.net);
     for (const [a, v] of Object.entries(evOrder)) bump(a, v.net);
     for (const [a, v] of Object.entries(evPay)) bump(a, v.net);
-    for (const [a, v] of Object.entries(transfer)) bump(a, v.net);
-
-    const assets = new Set<string>([
-      ...Object.keys(realized),
-      ...Object.keys(comm),
-      ...Object.keys(refkick),
-      ...Object.keys(fund),
-      ...Object.keys(ins),
-      ...Object.keys(swapsAgg),
-      ...Object.keys(evOrder),
-      ...Object.keys(evPay),
-      ...Object.keys(transfer),
-    ]);
+    for (const [a, v] of Object.entries(transferAgg)) bump(a, v.net);
+    for (const [a, v] of Object.entries(gridbotAgg)) bump(a, v.net);
+    for (const type of Object.keys(otherByType)) {
+      for (const [a, v] of Object.entries(otherByType[type])) bump(a, v.net);
+    }
 
     const L: string[] = [];
     L.push("Summary of your balance log (UTC+0):", "");
@@ -648,14 +726,17 @@ export default function App() {
     Array.from(assets)
       .sort()
       .forEach((asset) => {
-        const r = realized[asset];
-        const c = comm[asset];
-        const rk = refkick[asset];
-        const f = fund[asset];
-        const i = ins[asset];
-        const sw = swapsAgg[asset];
+        const r = realizedAgg[asset];
+        const c = commAgg[asset];
+        const rk = refkickAgg[asset];
+        const f = fundAgg[asset];
+        const i = insAgg[asset];
+        const cs = coinSwapAggByAsset[asset];
+        const ae = autoExAggByAsset[asset];
         const eo = evOrder[asset];
         const ep = evPay[asset];
+        const tr = transferAgg[asset];
+        const gb = gridbotAgg[asset];
 
         L.push(`Asset: ${asset}`);
 
@@ -679,18 +760,46 @@ export default function App() {
           pushIf(i.pos > EPS, `  Liquidation Clearance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
           pushIf(i.neg > EPS, `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
         }
-        if (sw) {
-          pushIf(sw.pos > EPS, `  Coin-Swap/Auto-Exchange Received ${asset}: +${fmtAbs(sw.pos)}`);
-          pushIf(sw.neg > EPS, `  Coin-Swap/Auto-Exchange Used ${asset}: −${fmtAbs(sw.neg)}`);
+        if (cs) {
+          pushIf(cs.pos > EPS, `  Coin Swaps Received ${asset}: +${fmtAbs(cs.pos)}`);
+          pushIf(cs.neg > EPS, `  Coin Swaps Used ${asset}: −${fmtAbs(cs.neg)}`);
+        }
+        if (ae) {
+          pushIf(ae.pos > EPS, `  Auto-Exchange Received ${asset}: +${fmtAbs(ae.pos)}`);
+          pushIf(ae.neg > EPS, `  Auto-Exchange Used ${asset}: −${fmtAbs(ae.neg)}`);
         }
         if (ep) pushIf(ep.pos > EPS, `  Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
         if (eo) pushIf(eo.neg > EPS, `  Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
 
+        if (tr && (tr.pos > EPS || tr.neg > EPS)) {
+          pushIf(true, `  Transfers (General) — Received ${asset}: +${fmtAbs(tr.pos)} / Paid ${asset}: −${fmtAbs(tr.neg)}`);
+        }
+        if (gb && (gb.pos > EPS || gb.neg > EPS)) {
+          pushIf(
+            true,
+            `  Total Transfer To/From the Futures GridBot Wallet — ${asset}: −${fmtAbs(gb.neg)} / +${fmtAbs(gb.pos)}`
+          );
+        }
+
+        // Other types by asset for this asset
+        const otherLines: string[] = [];
+        for (const [t, m] of Object.entries(otherByType)) {
+          const v = m[asset];
+          if (!v) continue;
+          const parts: string[] = [];
+          if (v.pos > EPS) parts.push(`+${fmtAbs(v.pos)}`);
+          if (v.neg > EPS) parts.push(`−${fmtAbs(v.neg)}`);
+          if (parts.length) otherLines.push(`    ${t}: ${parts.join(" / ")} ${asset}`);
+        }
+        if (otherLines.length) {
+          L.push("  Other Types (non-event):");
+          L.push(...otherLines);
+        }
+
         const net = total[asset] ?? 0;
-        pushIf(
-          Math.abs(net) > EPS,
-          `  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`
-        );
+        if (abs(net) > EPS) {
+          L.push(`  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
+        }
         L.push("");
       });
 
@@ -713,8 +822,8 @@ export default function App() {
   }
 
   function copyEvents() {
-    const orders = events.filter((r) => r.type === "EVENT_CONTRACTS_ORDER");
-    const payouts = events.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT");
+    const orders = events.filter((r) => r.type === TYPE.EVENT_ORDER);
+    const payouts = events.filter((r) => r.type === TYPE.EVENT_PAYOUT);
     const byOrder = sumByAsset(orders);
     const byPayout = sumByAsset(payouts);
     const assets = Array.from(new Set([...Object.keys(byOrder), ...Object.keys(byPayout)])).sort();
@@ -774,7 +883,7 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  // Copy all symbols as a readable multi-section text
+  // Copy all symbols as readable text
   function copyAllSymbolsText() {
     if (!symbolBlocks.length) return copyText("No symbol activity.");
     const L: string[] = ["By Symbol (Futures, not Events)", ""];
@@ -799,10 +908,9 @@ export default function App() {
 
   // Save PNG of full symbols table
   async function saveSymbolsPng() {
-    const table = tableRef.current;
-    if (!table) return;
-    const wrapper = table.closest(".tablewrap") as HTMLElement;
-    await elementToPng(wrapper, "symbols_table.png");
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    await elementToPng(wrap, "symbols_table.png");
   }
 
   // Save PNG of one row
@@ -836,13 +944,16 @@ export default function App() {
       "888888888888\t1059874281\tUSDT\tEVENT_CONTRACTS_ORDER\t-50\t2025-07-01 10:00:00\t\t\t\t2025-07-01 10:00:00",
       "888888888889\t1059874281\tUSDT\tEVENT_CONTRACTS_PAYOUT\t70\t2025-07-02 10:00:00\t\t\t\t2025-07-02 10:00:00",
       "888888888890\t1059874281\tUSDT\tEVENT_CONTRACTS_FEE\t-1.5\t2025-07-02 10:01:00\t\t\t\t2025-07-02 10:01:00",
+      "123456789000\t1059874281\tUSDT\tSTRATEGY_UMFUTURES_TRANSFER\t-10\t2025-07-02 11:00:00\t\t\t\t2025-07-02 11:00:00",
     ].join("\n");
 
     const { rows: rs } = parseBalanceLog(fixture);
-    const lines = coinSwapGroups(rs);
-    if (lines.length !== 2) throw new Error("Swap grouping failed");
-    if (!rs.some((r) => r.type === "REFERRAL_KICKBACK")) throw new Error("Referral Kickback missing");
+    const coin = groupSwaps(rs, "COIN_SWAP");
+    const auto = groupSwaps(rs, "AUTO_EXCHANGE");
+    if (!(coin.length && auto.length)) throw new Error("Swap grouping split failed");
+    if (!rs.some((r) => r.type === TYPE.REFERRAL_KICKBACK)) throw new Error("Referral Kickback missing");
     if (!rs.some((r) => r.type === "EVENT_CONTRACTS_FEE")) throw new Error("Event – Other missing");
+    if (!rs.some((r) => r.type === TYPE.GRIDBOT_TRANSFER)) throw new Error("GridBot transfer missing");
     alert("Self-test passed ✅");
   }
 
@@ -971,7 +1082,50 @@ export default function App() {
               <RpnCard title="Referral Kickback" map={referralByAsset} />
               <RpnCard title="Funding Fees" map={fundingByAsset} />
               <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-              <RpnCard title="Transfers (General)" map={transfersByAsset} />
+
+              {/* Transfers grouped */}
+              <div className="card">
+                <div className="card-head">
+                  <h3>Transfers</h3>
+                </div>
+                <div className="stack">
+                  <div className="typecard">
+                    <div className="card-head"><h4>General</h4></div>
+                    <ul className="kv">
+                      {Object.keys(transfersByAsset).length ? (
+                        Object.entries(transfersByAsset).map(([asset, v]) => (
+                          <li key={asset} className="kv-row">
+                            <span className="label">{asset}</span>
+                            <span className="num good">+{fmtAbs(v.pos)}</span>
+                            <span className="num bad">−{fmtAbs(v.neg)}</span>
+                            <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                          </li>
+                        ))
+                      ) : (
+                        <li className="kv-row"><span className="muted">None</span></li>
+                      )}
+                    </ul>
+                  </div>
+
+                  <div className="typecard">
+                    <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
+                    <ul className="kv">
+                      {Object.keys(gridbotByAsset).length ? (
+                        Object.entries(gridbotByAsset).map(([asset, v]) => (
+                          <li key={asset} className="kv-row">
+                            <span className="label">{asset}</span>
+                            <span className="num good">+{fmtAbs(v.pos)}</span>
+                            <span className="num bad">−{fmtAbs(v.neg)}</span>
+                            <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                          </li>
+                        ))
+                      ) : (
+                        <li className="kv-row"><span className="muted">None</span></li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
 
               {/* Other Types moved UP here (inside cards area) */}
               {otherTypesNonEvent.length > 0 && (
@@ -993,7 +1147,7 @@ export default function App() {
               </div>
 
               {symbolBlocks.length ? (
-                <div className="tablewrap">
+                <div className="tablewrap" ref={tableWrapRef} id="symbols-wrap">
                   <table className="table" ref={tableRef}>
                     <thead>
                       <tr>
@@ -1037,19 +1191,19 @@ export default function App() {
         <section className="space">
           <div className="card">
             <div className="card-head" style={{ justifyContent: "space-between" }}>
-              <h2>Coin Swaps & Auto-Exchange (UTC+0)</h2>
+              <h2>Swaps (UTC+0)</h2>
               <div className="btn-row">
-                <button className="btn" onClick={() => copySwaps(swapAuto, "Auto-Exchange")}>Copy Auto-Exchange</button>
-                <button className="btn" onClick={() => copySwaps(swapCoin, "Coin Swaps")}>Copy Coin Swaps</button>
+                <button className="btn" onClick={() => copySwaps(coinSwapLines, "Coin Swaps")}>Copy Coin Swaps</button>
+                <button className="btn" onClick={() => copySwaps(autoExLines, "Auto-Exchange")}>Copy Auto-Exchange</button>
               </div>
             </div>
 
             <div className="grid two">
               <div>
-                <h4 className="muted">Auto-Exchange</h4>
-                {swapAuto.length ? (
+                <h4 className="muted">Coin Swaps</h4>
+                {coinSwapLines.length ? (
                   <ul className="list">
-                    {swapAuto.map((s, i) => (
+                    {coinSwapLines.map((s, i) => (
                       <li key={i} className="num">{s.text}</li>
                     ))}
                   </ul>
@@ -1059,10 +1213,10 @@ export default function App() {
               </div>
 
               <div>
-                <h4 className="muted">Coin Swaps</h4>
-                {swapCoin.length ? (
+                <h4 className="muted">Auto-Exchange</h4>
+                {autoExLines.length ? (
                   <ul className="list">
-                    {swapCoin.map((s, i) => (
+                    {autoExLines.map((s, i) => (
                       <li key={i} className="num">{s.text}</li>
                     ))}
                   </ul>
@@ -1072,7 +1226,7 @@ export default function App() {
               </div>
             </div>
 
-            <p className="hint">Each line groups all legs that happened at the same second (UTC+0).</p>
+            <p className="hint">Each line groups all legs that happened at the same second (UTC+0). Types are kept separate.</p>
           </div>
         </section>
       )}
@@ -1145,7 +1299,7 @@ export default function App() {
         <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
           <div className="modal">
             <div className="modal-head">
-              <h3>Copy Response (Full) — Preview & Edit</h3>
+              <h3>Copy Response (Full) — Preview &amp; Edit</h3>
               <button className="btn" onClick={() => setShowFullPreview(false)}>Close</button>
             </div>
             <textarea
@@ -1167,8 +1321,8 @@ export default function App() {
 
 /* ---------- small components ---------- */
 function EventSummary({ rows }: { rows: Row[] }) {
-  const orders = rows.filter((r) => r.type === "EVENT_CONTRACTS_ORDER");
-  const payouts = rows.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT");
+  const orders = rows.filter((r) => r.type === TYPE.EVENT_ORDER);
+  const payouts = rows.filter((r) => r.type === TYPE.EVENT_PAYOUT);
   const byOrder = sumByAsset(orders);
   const byPayout = sumByAsset(payouts);
   const assets = Array.from(new Set([...Object.keys(byOrder), ...Object.keys(byPayout)])).sort();
@@ -1257,7 +1411,7 @@ const css = `
 }
 *{box-sizing:border-box} body{margin:0}
 .wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
-.header{max-width:1080px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
+.header{max-width:1200px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
 .header h1{margin:0 0 2px;font-size:26px}
 .muted{color:var(--muted)}
 .good{color:#059669}
@@ -1269,12 +1423,12 @@ const css = `
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
 .btn-small{padding:6px 10px}
-.space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;max-width:1080px}
+.space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
 .grid{display:grid;gap:12px}
-.grid.two{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 .pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px}
 .kv{display:grid;gap:8px}
@@ -1285,13 +1439,13 @@ const css = `
 .error{color:#b91c1c;margin:8px 0 0}
 .diags summary{cursor:pointer;font-weight:600}
 .diagbox{width:100%;height:120px;background:#fbfcfe;border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
-.tabs{max-width:1080px;margin:6px auto 0;padding:0 16px;display:flex;gap:8px;flex-wrap:wrap}
+.tabs{max-width:1200px;margin:6px auto 0;padding:0 16px;display:flex;gap:8px;flex-wrap:wrap}
 .tab{border:1px solid var(--line);background:#fff;padding:8px 12px;border-radius:999px;cursor:pointer}
 .tab.active{background:var(--dark);border-color:var(--dark);color:#fff}
 .tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
 .table{width:100%;border-collapse:separate;border-spacing:0}
 .table th,.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
-.table thead th{background:#fbfcfe;font-weight:700}
+.table thead th{background:#fbfcfe;font-weight:700;position:sticky;top:0;z-index:1}
 .table .label{font-weight:600}
 .table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .table.small td,.table.small th{padding:8px 10px}
@@ -1299,6 +1453,7 @@ const css = `
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
 .pair{display:inline-block;margin-right:2px}
+.actions{min-width:180px}
 .sticky.actions{position:sticky; right:0; background:#fff; z-index:2; box-shadow:-1px 0 0 0 var(--line)}
 .dropzone{
   width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
