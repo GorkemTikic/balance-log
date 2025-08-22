@@ -7,9 +7,6 @@ import React, { useMemo, useRef, useState } from "react";
  * - GridPasteBox: accepts Ctrl/⌘+V from the website; reads text/html, extracts <table>,
  *   preserves empty cells, shows a grid preview, and feeds TSV to the existing parser.
  * - Manual textarea kept under a collapsible block for fallback.
- * - Single PNG export for the entire "By Symbol" table.
- * - "Copy Symbols (text)" for fast sharing.
- * - Filter "By Symbol" to hide symbols with no activity (no PnL/Funding/Commission/Insurance).
  * Everything else (summaries, grouped swaps, events, referral kickback, etc.) stays the same.
  */
 
@@ -99,7 +96,7 @@ function parseBalanceLog(text: string) {
     }
 
     const id = cols[0] ?? "";
-    the uid = cols[1] ?? "";
+    const uid = cols[1] ?? "";
     const asset = cols[2] ?? "";
     const type = cols[3] ?? "";
     const amountRaw = cols[4] ?? "";
@@ -159,9 +156,6 @@ function groupBySymbol(rows: Row[]) {
   }
   return m;
 }
-function isEmptyMap(m: Record<string, any>) {
-  return !m || Object.keys(m).length === 0;
-}
 function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
   const out: Array<{
@@ -178,27 +172,12 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const comm = rs.filter((r) => r.type === "COMMISSION");
     const ins = rs.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
 
-    const realizedByAsset = sumByAsset(realized);
-    const fundingByAsset = sumByAsset(funding);
-    const commByAsset = sumByAsset(comm);
-    const insByAsset = sumByAsset(ins);
-
-    // NEW: hide symbols where there is no activity (no PnL / Funding / Commission / Insurance)
-    if (
-      isEmptyMap(realizedByAsset) &&
-      isEmptyMap(fundingByAsset) &&
-      isEmptyMap(commByAsset) &&
-      isEmptyMap(insByAsset)
-    ) {
-      continue;
-    }
-
     out.push({
       symbol,
-      realizedByAsset,
-      fundingByAsset,
-      commByAsset,
-      insByAsset,
+      realizedByAsset: sumByAsset(realized),
+      fundingByAsset: sumByAsset(funding),
+      commByAsset: sumByAsset(comm),
+      insByAsset: sumByAsset(ins),
     });
   }
   out.sort((a, b) => a.symbol.localeCompare(b.symbol));
@@ -401,56 +380,6 @@ function fmtAssetPairs(map: Record<string, { pos: number; neg: number; net: numb
   return parts.length ? parts.join(", ") : "–";
 }
 
-/* ---------- Export helpers (single PNG of a DOM node) ---------- */
-async function nodeToPng(node: HTMLElement, filename = "symbols.png") {
-  const { width, height } = node.getBoundingClientRect();
-  // Include some padding for nicer edges
-  const pad = 16;
-  const w = Math.ceil(width) + pad * 2;
-  const h = Math.ceil(height) + pad * 2;
-
-  const style = new XMLSerializer().serializeToString(document.styleSheets ? document.documentElement : document.documentElement);
-  const html = `
-    <div xmlns="http://www.w3.org/1999/xhtml" style="padding:${pad}px;background:#ffffff;color:#111">
-      ${node.outerHTML}
-    </div>`;
-
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
-      <foreignObject x="0" y="0" width="100%" height="100%">
-        ${html}
-      </foreignObject>
-    </svg>`;
-
-  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-
-  // Draw SVG to canvas
-  const img = new Image();
-  img.src = url;
-  await img.decode();
-
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(img, 0, 0);
-
-  URL.revokeObjectURL(url);
-
-  // Download PNG
-  canvas.toBlob((png) => {
-    if (!png) return;
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(png);
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 0);
-  });
-}
-
 /* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
@@ -458,6 +387,10 @@ export default function App() {
   const [diags, setDiags] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
+
+  // Preview modal state
+  const [showFullPreview, setShowFullPreview] = useState(false);
+  const [fullPreviewText, setFullPreviewText] = useState("");
 
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
@@ -486,12 +419,7 @@ export default function App() {
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
   const insuranceByAsset = useMemo(() => sumByAsset(insurance), [insurance]);
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
-
   const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
-
-  // Refs for exporting the full "By Symbol" section
-  const symbolExportRef = useRef<HTMLDivElement | null>(null);
-  const symbolTableRef = useRef<HTMLTableElement | null>(null);
 
   function runParse(tsv: string) {
     setError("");
@@ -526,63 +454,9 @@ export default function App() {
     navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
   }
 
-  function copySummary() {
-    const L: string[] = [];
-    L.push("FD Summary (UTC+0)", "");
-
-    const pushPL = (title: string, map: Record<string, { pos: number; neg: number }>) => {
-      const keys = Object.keys(map);
-      if (!keys.length) return;
-      L.push(title + ":");
-      keys.forEach((asset) => {
-        const v = map[asset];
-        L.push(`  Total Profit ${asset}: +${fmtAbs(v.pos)}`);
-        L.push(`  Total Loss ${asset}: −${fmtAbs(v.neg)}`);
-      });
-      L.push("");
-    };
-    pushPL("Realized PnL (Futures, not Events)", realizedByAsset);
-
-    const pushRPN = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
-      const keys = Object.keys(map);
-      if (!keys.length) return;
-      L.push(title + ":");
-      keys.forEach((asset) => {
-        const v = map[asset];
-        L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
-        L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
-        L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
-      });
-      L.push("");
-    };
-    pushRPN("Trading Fees / Commission", commissionByAsset);
-    pushRPN("Referral Kickback", referralByAsset);
-    pushRPN("Funding Fees", fundingByAsset);
-    pushRPN("Insurance / Liquidation", insuranceByAsset);
-    pushRPN("Transfers (General)", transfersByAsset);
-
-    if (otherTypesNonEvent.length) {
-      const byType: Record<string, Row[]> = {};
-      otherTypesNonEvent.forEach((r) => ((byType[r.type] = byType[r.type] || []).push(r)));
-      L.push("Other Types (non-event):");
-      Object.keys(byType)
-        .sort()
-        .forEach((t) => {
-          const m = sumByAsset(byType[t]);
-          L.push(`  ${t}:`);
-          Object.entries(m).forEach(([asset, v]) => {
-            L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
-            L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
-            L.push(`    Net ${asset}: ${fmtSigned(v.net)}`);
-          });
-        });
-    }
-    sectionCopy(L.join("\n"));
-  }
-
-  // >>> Full per-asset response (includes swaps & events, hides zero lines)
-  function copyFullResponse() {
-    if (!rows.length) return sectionCopy("No data.");
+  /** Build the Full Response text once, reused by copy & preview */
+  function buildFullResponse(): string {
+    if (!rows.length) return "No data.";
 
     const collect = (pred: (r: Row) => boolean) => sumByAsset(rows.filter(pred));
 
@@ -670,9 +544,73 @@ export default function App() {
       L.push("");
     });
 
-    sectionCopy(L.join("\n").replace(/\n{3,}/g, "\n\n"));
+    return L.join("\n").replace(/\n{3,}/g, "\n\n");
   }
-  // <<< end
+
+  function copySummary() {
+    const L: string[] = [];
+    L.push("FD Summary (UTC+0)", "");
+
+    const pushPL = (title: string, map: Record<string, { pos: number; neg: number }>) => {
+      const keys = Object.keys(map);
+      if (!keys.length) return;
+      L.push(title + ":");
+      keys.forEach((asset) => {
+        const v = map[asset];
+        L.push(`  Total Profit ${asset}: +${fmtAbs(v.pos)}`);
+        L.push(`  Total Loss ${asset}: −${fmtAbs(v.neg)}`);
+      });
+      L.push("");
+    };
+    pushPL("Realized PnL (Futures, not Events)", realizedByAsset);
+
+    const pushRPN = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
+      const keys = Object.keys(map);
+      if (!keys.length) return;
+      L.push(title + ":");
+      keys.forEach((asset) => {
+        const v = map[asset];
+        L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
+        L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
+        L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
+      });
+      L.push("");
+    };
+    pushRPN("Trading Fees / Commission", commissionByAsset);
+    pushRPN("Referral Kickback", referralByAsset);
+    pushRPN("Funding Fees", fundingByAsset);
+    pushRPN("Insurance / Liquidation", insuranceByAsset);
+    pushRPN("Transfers (General)", transfersByAsset);
+
+    if (otherTypesNonEvent.length) {
+      const byType: Record<string, Row[]> = {};
+      otherTypesNonEvent.forEach((r) => ((byType[r.type] = byType[r.type] || []).push(r)));
+      L.push("Other Types (non-event):");
+      Object.keys(byType)
+        .sort()
+        .forEach((t) => {
+          const m = sumByAsset(byType[t]);
+          L.push(`  ${t}:`);
+          Object.entries(m).forEach(([asset, v]) => {
+            L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
+            L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
+            L.push(`    Net ${asset}: ${fmtSigned(v.net)}`);
+          });
+        });
+    }
+    sectionCopy(L.join("\n"));
+  }
+
+  // Copy the Full per-asset response (includes swaps & events, hides zero lines)
+  function copyFullResponse() {
+    sectionCopy(buildFullResponse());
+  }
+
+  // Open the overlay with editable full response
+  function openFullPreview() {
+    setFullPreviewText(buildFullResponse());
+    setShowFullPreview(true);
+  }
 
   function copySwaps() {
     const L: string[] = ["Coin Swaps & Auto-Exchange (UTC+0)", ""];
@@ -847,12 +785,16 @@ export default function App() {
           <div className="card">
             <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Summary (UTC+0)</h2>
+              {/* kept layout: just add buttons next to existing one */}
               <div className="btn-row">
                 <button className="btn btn-success" onClick={copySummary}>
                   Copy Summary (no Swaps)
                 </button>
                 <button className="btn" onClick={copyFullResponse}>
                   Copy Response (Full)
+                </button>
+                <button className="btn" onClick={openFullPreview}>
+                  Preview & Edit Full
                 </button>
               </div>
             </div>
@@ -885,50 +827,11 @@ export default function App() {
               <RpnCard title="Transfers (General)" map={sumByAsset(transfers)} />
             </div>
 
-            {/* By Symbol section with Copy / PNG export */}
-            <div className="subcard" ref={symbolExportRef}>
-              <div className="card-head" style={{ marginBottom: 0 }}>
-                <h3>By Symbol (Futures, not Events)</h3>
-                {symbolBlocks.length > 0 && (
-                  <div className="btn-row">
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        const L: string[] = [];
-                        L.push("By Symbol (Futures, not Events)");
-                        L.push("");
-                        symbolBlocks.forEach((b) => {
-                          L.push(
-                            [
-                              b.symbol,
-                              fmtAssetPairs(b.realizedByAsset),
-                              fmtAssetPairs(b.fundingByAsset),
-                              fmtAssetPairs(b.commByAsset),
-                              fmtAssetPairs(b.insByAsset),
-                            ].join(" | ")
-                          );
-                        });
-                        sectionCopy(L.join("\n"));
-                      }}
-                    >
-                      Copy Symbols (text)
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={async () => {
-                        if (!symbolTableRef.current) return;
-                        await nodeToPng(symbolTableRef.current.closest(".tablewrap") as HTMLElement, "symbols.png");
-                      }}
-                    >
-                      Save Symbols PNG
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {symbolBlocks.length ? (
+            <div className="subcard">
+              <h3>By Symbol (Futures, not Events)</h3>
+              {bySymbolSummary(nonEvent).length ? (
                 <div className="tablewrap">
-                  <table className="table" ref={symbolTableRef}>
+                  <table className="table">
                     <thead>
                       <tr>
                         <th>Symbol</th>
@@ -939,7 +842,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {symbolBlocks.map((b) => (
+                      {bySymbolSummary(nonEvent).map((b) => (
                         <tr key={b.symbol}>
                           <td className="label">{b.symbol}</td>
                           <td className="num">{fmtAssetPairs(b.realizedByAsset)}</td>
@@ -1055,6 +958,32 @@ export default function App() {
             </div>
           </div>
         </section>
+      )}
+
+      {/* Full Response Preview Modal */}
+      {showFullPreview && (
+        <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
+          <div className="modal">
+            <div className="modal-head">
+              <h3>Copy Response (Full) — Preview & Edit</h3>
+              <button className="btn" onClick={() => setShowFullPreview(false)}>Close</button>
+            </div>
+            <textarea
+              className="modal-text"
+              value={fullPreviewText}
+              onChange={(e) => setFullPreviewText(e.target.value)}
+            />
+            <div className="btn-row" style={{ marginTop: 8 }}>
+              <button className="btn btn-success" onClick={() => sectionCopy(fullPreviewText)}>
+                Copy Edited Text
+              </button>
+              <button className="btn" onClick={() => setFullPreviewText(buildFullResponse())}>
+                Reset to Auto Text
+              </button>
+            </div>
+            <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) is applied in the auto text.</p>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1198,4 +1127,16 @@ const css = `
   text-align:center; user-select:none; outline:none;
 }
 .dropzone:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,98,254,0.15)}
+
+/* Modal overlay */
+.overlay{
+  position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:1000;
+}
+.modal{
+  width:min(980px, 100%); max-height:85vh; background:#fff; border:1px solid var(--line); border-radius:14px; box-shadow:0 20px 50px rgba(0,0,0,.2); padding:14px; display:flex; flex-direction:column;
+}
+.modal-head{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px}
+.modal-text{
+  width:100%; height:55vh; border:1px solid var(--line); border-radius:10px; padding:10px; font:13px/1.4 ui-monospace,Menlo,Consolas,monospace; white-space:pre; overflow:auto; background:#fbfcfe;
+}
 `;
