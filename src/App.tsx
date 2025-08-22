@@ -5,8 +5,9 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
  * Fix in this revision:
- *  - Grid now declares THREE columns (left | splitter | right), so the right pane no longer drops below.
+ *  - Grid declares THREE columns (left | splitter | right), so the right pane no longer drops below.
  *  - Splitter width is a single source of truth (SPLIT_W) used by both CSS and inline grid template.
+ *  - Build fix: React inline style now uses camelCase (justifyContent) everywhere.
  */
 
 type Row = {
@@ -602,8 +603,7 @@ export default function App() {
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left; // pointer X from left edge
       const cw = rect.width;
-      // right column percentage (subtract nothing for splitter; we define its own grid track)
-      const newRightPct = ((cw - x) / cw) * 100;
+      const newRightPct = ((cw - x) / cw) * 100; // splitter has its own grid track
       const clamped = Math.min(60, Math.max((360 / cw) * 100, newRightPct));
       setRightPct(clamped);
     }
@@ -1196,7 +1196,7 @@ export default function App() {
       {activeTab === "swaps" && (
         <section className="space">
           <div className="card">
-            <div className="card-head" style={{ justify-content: "space-between" }}>
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Swaps (UTC+0)</h2>
               <div className="btn-row">
                 <button className="btn" onClick={() => copySwaps(coinSwapLines, "Coin Swaps")}>Copy Coin Swaps</button>
@@ -1222,7 +1222,7 @@ export default function App() {
       {activeTab === "events" && (
         <section className="space">
           <div className="card">
-            <div className="card-head" style={{ justify-content: "space-between" }}>
+            <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Event Contracts (separate product)</h2>
               <button className="btn" onClick={copyEvents}>Copy Events</button>
             </div>
@@ -1396,7 +1396,7 @@ const css = `
 
 /* Sections & Cards */
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
-.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px 0;overflow:hidden} /* stretch in grid */
+.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px 0;overflow:hidden}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
 .grid{display:grid;gap:12px;align-items:start}
