@@ -4,10 +4,12 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
- * This revision adds:
- *  - Sticky right "Actions" column with compact icon buttons (📝/🖼️)
- *  - Body cell wrapping (header remains nowrap) to fit all metric columns more often
- *  - Raised minimum right pane width to ~420px for better default usability
+ * This revision updates ONLY the top Asset KPI tiles (USDT / USDC / BNFCR):
+ *  - Line 1: asset label
+ *  - Line 2: Net (large, color-coded)
+ *  - Line 3: two chips — Received (green), Paid (red). If 0, shows a muted "—" chip for alignment
+ *  - Fixed 3-column grid for visual consistency
+ *  - No changes to decimals or math/precision anywhere
  */
 
 type Row = {
@@ -151,7 +153,7 @@ function parseBalanceLog(text: string) {
 
     const amount = Number(amountRaw);
     if (Number.isNaN(amount)) {
-      diags.push(`• Skopped (amount not numeric): ${line.slice(0, 160)}`);
+      diags.push(`• Skipped (amount not numeric): ${line.slice(0, 160)}`);
       continue;
     }
 
@@ -604,7 +606,7 @@ export default function App() {
       const x = e.clientX - rect.left;
       const cw = rect.width;
       const newRightPct = ((cw - x) / cw) * 100;
-      const minPct = (420 / cw) * 100; // raised min width (~420px)
+      const minPct = (420 / cw) * 100; // keep better default usability
       const clamped = Math.min(60, Math.max(minPct, newRightPct));
       setRightPct(clamped);
     }
@@ -1039,23 +1041,31 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          {/* Header (2 rows) */}
+          {/* KPI HEADER (row 1: USDT/USDC/BNFCR tiles; row 2: KPIs + actions) */}
           <div className="kpi sticky card">
-            <div className="kpi-row tiles">
+            {/* Asset tiles row */}
+            <div className="kpi-row asset-tiles">
               {["USDT", "USDC", "BNFCR"].map((a) => {
-                const v = realizedByAsset[a];
-                if (!v) return null;
-                const chunks: React.ReactNode[] = [];
-                if (gt(v.pos)) chunks.push(<span key="p" className="good">+{fmtAbs(v.pos)}</span>);
-                if (gt(v.neg)) chunks.push(<span key="n" className="bad">−{fmtAbs(v.neg)}</span>);
+                const v = realizedByAsset[a] || { pos: 0, neg: 0, net: 0 };
+                const hasPos = gt(v.pos);
+                const hasNeg = gt(v.neg);
+                const net = v.net || 0;
+                const netClass = net > 0 ? "good" : net < 0 ? "bad" : "muted";
+                const aria = `${a} — Net ${gt(net) ? fmtSigned(net) : "0"}; Received ${hasPos ? `+${fmtAbs(v.pos)}` : "0"}; Paid ${hasNeg ? `−${fmtAbs(v.neg)}` : "0"} (UTC+0)`;
                 return (
-                  <div key={a} className="tile" title={`Realized PnL in ${a}`}>
-                    <div className="tile-head">{a}</div>
-                    <div className="tile-sub">{chunks.length ? chunks.reduce((acc, el, i) => (i ? [...acc, " • ", el] : [el]), [] as any) : "–"}</div>
+                  <div key={a} className="asset-tile" aria-label={aria} title={`Realized PnL in ${a}`}>
+                    <div className="asset-title">{a}</div>
+                    <div className={`asset-net ${netClass}`}>{gt(net) ? fmtSigned(net) : "0"}</div>
+                    <div className="asset-chips">
+                      <span className={`chip ${hasPos ? "good" : "muted"}`}>{hasPos ? `+${fmtAbs(v.pos)}` : "—"}</span>
+                      <span className={`chip ${hasNeg ? "bad" : "muted"}`}>{hasNeg ? `−${fmtAbs(v.neg)}` : "—"}</span>
+                    </div>
                   </div>
                 );
               })}
             </div>
+
+            {/* KPIs & actions row */}
             <div className="kpi-row topbar">
               <div className="kpigrid">
                 <div className="kpi-block"><div className="kpi-title">Trades parsed</div><div className="kpi-num">{kpis.tradesParsed}</div></div>
@@ -1435,10 +1445,9 @@ const css = `
 .actcol{position:sticky;right:0;background:#fff;box-shadow:-1px 0 0 var(--line);z-index:2;min-width:120px}
 .table thead .actcol{z-index:4}
 
-/* Sticky KPI header (2 rows) */
+/* Sticky KPI header */
 .kpi.sticky{position:sticky; top:8px; z-index:5}
 .kpi-row{display:grid; gap:10px; align-items:center}
-.kpi-row.tiles{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 .kpi-row.topbar{grid-template-columns:1fr auto; align-items:start}
 .kpigrid{display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .kpi-actions{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end}
@@ -1447,6 +1456,17 @@ const css = `
 .kpi-block.as-btn:hover{background:#f3f6ff;border-color:#d9e2ff}
 .kpi-title{font-size:12px;color:var(--muted);font-weight:700;margin-bottom:2px}
 .kpi-num{font-weight:800}
+
+/* NEW: Asset KPI Tiles (USDT/USDC/BNFCR) */
+.asset-tiles{grid-template-columns:repeat(3, minmax(240px, 1fr))}
+.asset-tile{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:86px}
+.asset-title{font-size:12px;color:var(--muted);font-weight:800}
+.asset-net{font-weight:900;font-size:18px;letter-spacing:0.1px}
+.asset-chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-weight:700;font-size:12px;background:#fbfcfe}
+.chip.good{color:#059669;border-color:#d1fae5;background:#ecfdf5}
+.chip.bad{color:#dc2626;border-color:#fee2e2;background:#fef2f2}
+.chip.muted{color:var(--muted);border-color:var(--line);background:#f7f8fb}
 
 /* Dual-pane layout: THREE columns (left | splitter | right) */
 .dual{display:grid;gap:10px;grid-template-columns:minmax(0,1fr) ${SPLIT_W}px 45%;align-items:start;margin-top:8px}
@@ -1474,6 +1494,7 @@ const css = `
 
 /* Responsive stacking */
 @media (max-width: 980px){
+  .asset-tiles{grid-template-columns:1fr}
   .dual{grid-template-columns:1fr}
   .splitter{display:none}
   .right{position:relative;top:auto;max-height:none}
