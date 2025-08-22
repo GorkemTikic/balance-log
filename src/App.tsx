@@ -1,12 +1,13 @@
+// src/App.tsx
 import React, { useMemo, useRef, useState } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * - GridPasteBox (paste table from web)
- * - Summary cards (includes “Other Types (non-event)” in-card, above By Symbol)
+ * - Summary cards (includes “Other Types (non-event)” inside the summary area)
  * - By Symbol with per-row Copy / Save PNG (sticky Actions)
  * - Coin Swaps tab split: Auto-Exchange vs Coin Swaps
- * - “Save Symbols PNG” exports the whole table as one tall PNG
+ * - “Save Symbols PNG” exports the whole symbols table as one tall PNG
+ * - Full Response preview/edit modal
  */
 
 type Row = {
@@ -474,6 +475,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
 
+  // Full response preview/edit
+  const [showFullPreview, setShowFullPreview] = useState(false);
+  const [fullPreviewText, setFullPreviewText] = useState("");
+
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
   const events = useMemo(() => onlyEvents(parsed), [parsed]);
@@ -594,8 +599,8 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  function copyFullResponse() {
-    if (!rows.length) return copyText("No data.");
+  function buildFullResponse(): string {
+    if (!rows.length) return "No data.";
 
     const collect = (pred: (r: Row) => boolean) => sumByAsset(rows.filter(pred));
 
@@ -607,7 +612,7 @@ export default function App() {
     const swapsAgg = collect((r) => SWAP_TYPES.has(r.type));
     const evOrder = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_ORDER"));
     const evPay = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT"));
-    const transfer = collect((r) => r.type === "TRANSFER");
+    const transfer = collect((r) => r.type === "TRANSFER"); // included in totals only
 
     const total: Record<string, number> = {};
     const bump = (a: string, v: number) => (total[a] = (total[a] ?? 0) + v);
@@ -689,7 +694,15 @@ export default function App() {
         L.push("");
       });
 
-    copyText(L.join("\n").replace(/\n{3,}/g, "\n\n"));
+    return L.join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+
+  function copyFullResponse() {
+    copyText(buildFullResponse());
+  }
+  function openFullPreview() {
+    setFullPreviewText(buildFullResponse());
+    setShowFullPreview(true);
   }
 
   function copySwaps(list: { text: string }[], title: string) {
@@ -928,6 +941,9 @@ export default function App() {
                 <button className="btn" onClick={copyFullResponse}>
                   Copy Response (Full)
                 </button>
+                <button className="btn" onClick={openFullPreview}>
+                  Preview/Edit Full Response
+                </button>
               </div>
             </div>
 
@@ -1123,6 +1139,28 @@ export default function App() {
           </div>
         </section>
       )}
+
+      {/* Full Response Preview Modal */}
+      {showFullPreview && (
+        <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
+          <div className="modal">
+            <div className="modal-head">
+              <h3>Copy Response (Full) — Preview & Edit</h3>
+              <button className="btn" onClick={() => setShowFullPreview(false)}>Close</button>
+            </div>
+            <textarea
+              className="modal-text"
+              value={fullPreviewText}
+              onChange={(e) => setFullPreviewText(e.target.value)}
+            />
+            <div className="btn-row" style={{ marginTop: 8 }}>
+              <button className="btn btn-success" onClick={() => copyText(fullPreviewText)}>Copy Edited Text</button>
+              <button className="btn" onClick={() => setFullPreviewText(buildFullResponse())}>Reset to Auto Text</button>
+            </div>
+            <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) applies in the auto text.</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1224,4 +1262,53 @@ const css = `
 .muted{color:var(--muted)}
 .good{color:#059669}
 .bad{color:#dc2626}
-.btn-row{display:flex;gap:8px;flex-wrap:
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer;font-weight:600}
+.btn:hover{background:#f9fafb}
+.btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
+.btn-success{background:var(--success);border-color:var(--success);color:#fff}
+.btn-small{padding:6px 10px}
+.space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;max-width:1080px}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
+.grid{display:grid;gap:12px}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.grid.three{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px}
+.kv{display:grid;gap:8px}
+.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.label{font-weight:600}
+.num{font-variant-numeric:tabular-nums}
+.paste{width:100%;height:120px;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;background:#fff}
+.error{color:#b91c1c;margin:8px 0 0}
+.diags summary{cursor:pointer;font-weight:600}
+.diagbox{width:100%;height:120px;background:#fbfcfe;border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
+.tabs{max-width:1080px;margin:6px auto 0;padding:0 16px;display:flex;gap:8px;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:#fff;padding:8px 12px;border-radius:999px;cursor:pointer}
+.tab.active{background:var(--dark);border-color:var(--dark);color:#fff}
+.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
+.table{width:100%;border-collapse:separate;border-spacing:0}
+.table th,.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
+.table thead th{background:#fbfcfe;font-weight:700}
+.table .label{font-weight:600}
+.table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+.table.small td,.table.small th{padding:8px 10px}
+.list{margin:0;padding:0 0 0 18px}
+.hint{margin-top:8px;font-size:12px;color:var(--muted)}
+.typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
+.pair{display:inline-block;margin-right:2px}
+.sticky.actions{position:sticky; right:0; background:#fff; z-index:2; box-shadow:-1px 0 0 0 var(--line)}
+.dropzone{
+  width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
+  padding:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);
+  text-align:center; user-select:none; outline:none;
+}
+.dropzone:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,98,254,0.15)}
+/* Modal overlay */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:1000}
+.modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
+`;
