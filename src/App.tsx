@@ -3,11 +3,10 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * Dual-pane Summary layout: LEFT analysis cards | RIGHT By Symbol (resizable)
- * Fixes in this revision:
- *  - Cards stretch to their grid tracks (no more centered “floating” cards)
- *  - Right pane is aligned to the top (sticky) and visually sits on the right
- *  - Splitter is clearer (grabber), wider hit area, better hover feedback
+ * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
+ * Fix in this revision:
+ *  - Grid now declares THREE columns (left | splitter | right), so the right pane no longer drops below.
+ *  - Splitter width is a single source of truth (SPLIT_W) used by both CSS and inline grid template.
  */
 
 type Row = {
@@ -61,6 +60,7 @@ const KNOWN_TYPES = new Set<string>([
 ]);
 
 const EPS = 1e-12;
+const SPLIT_W = 12; // splitter width (px)
 
 /* ---------- utils ---------- */
 const abs = (x: number) => Math.abs(Number(x) || 0);
@@ -438,8 +438,7 @@ function RpnCard({
 }
 
 function renderAssetPairs(map: Record<string, { pos: number; neg: number }>) {
-  const entries = Object.entries(map)
-    .filter(([, v]) => gt(v.pos) || gt(v.neg));
+  const entries = Object.entries(map).filter(([, v]) => gt(v.pos) || gt(v.neg));
   if (!entries.length) return <span>–</span>;
   return (
     <>
@@ -448,7 +447,8 @@ function renderAssetPairs(map: Record<string, { pos: number; neg: number }>) {
           {gt(v.pos) && <span className="good">+{fmtAbs(v.pos)}</span>}
           {gt(v.pos) && gt(v.neg) && " / "}
           {gt(v.neg) && <span className="bad">−{fmtAbs(v.neg)}</span>}{" "}
-          {asset}{i < entries.length - 1 ? ", " : ""}
+          {asset}
+          {i < entries.length - 1 ? ", " : ""}
         </span>
       ))}
     </>
@@ -600,8 +600,9 @@ export default function App() {
     function onMove(e: MouseEvent) {
       if (!dragging || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left; // left width
+      const x = e.clientX - rect.left; // pointer X from left edge
       const cw = rect.width;
+      // right column percentage (subtract nothing for splitter; we define its own grid track)
       const newRightPct = ((cw - x) / cw) * 100;
       const clamped = Math.min(60, Math.max((360 / cw) * 100, newRightPct));
       setRightPct(clamped);
@@ -1074,7 +1075,11 @@ export default function App() {
           </div>
 
           {/* Dual-pane: LEFT | SPLITTER | RIGHT */}
-          <div className="dual" ref={containerRef} style={{ gridTemplateColumns: `minmax(0,1fr) ${Math.round(rightPct)}%` }}>
+          <div
+            className="dual"
+            ref={containerRef}
+            style={{ gridTemplateColumns: `minmax(0,1fr) ${SPLIT_W}px ${Math.round(rightPct)}%` }}
+          >
             {/* LEFT */}
             <div className="left">
               <div className="grid three">
@@ -1191,7 +1196,7 @@ export default function App() {
       {activeTab === "swaps" && (
         <section className="space">
           <div className="card">
-            <div className="card-head" style={{ justifyContent: "space-between" }}>
+            <div className="card-head" style={{ justify-content: "space-between" }}>
               <h2>Swaps (UTC+0)</h2>
               <div className="btn-row">
                 <button className="btn" onClick={() => copySwaps(coinSwapLines, "Coin Swaps")}>Copy Coin Swaps</button>
@@ -1217,7 +1222,7 @@ export default function App() {
       {activeTab === "events" && (
         <section className="space">
           <div className="card">
-            <div className="card-head" style={{ justifyContent: "space-between" }}>
+            <div className="card-head" style={{ justify-content: "space-between" }}>
               <h2>Event Contracts (separate product)</h2>
               <button className="btn" onClick={copyEvents}>Copy Events</button>
             </div>
@@ -1438,12 +1443,12 @@ const css = `
 .kpi-title{font-size:12px;color:var(--muted);font-weight:700;margin-bottom:2px}
 .kpi-num{font-weight:800}
 
-/* Dual-pane layout */
-.dual{display:grid;gap:10px;grid-template-columns:1fr 45%;align-items:start;margin-top:8px}
+/* Dual-pane layout: THREE columns (left | splitter | right) */
+.dual{display:grid;gap:10px;grid-template-columns:minmax(0,1fr) ${SPLIT_W}px 45%;align-items:start;margin-top:8px}
 .left{min-width:0}
 .right{min-width:0;position:sticky;top:96px;align-self:start;max-height:calc(100vh - 120px);display:flex;flex-direction:column}
 .right-scroll{max-height:calc(100vh - 180px)}
-.splitter{position:relative;width:12px;cursor:col-resize;border-left:1px solid var(--line);border-right:1px solid var(--line);background:linear-gradient(to bottom,#f7f9fc,#eef2f9)}
+.splitter{position:relative;width:${SPLIT_W}px;cursor:col-resize;border-left:1px solid var(--line);border-right:1px solid var(--line);background:linear-gradient(to bottom,#f7f9fc,#eef2f9)}
 .splitter::before{
   content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
   width:4px;height:44px;border-radius:3px;
