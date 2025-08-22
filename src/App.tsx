@@ -7,6 +7,9 @@ import React, { useMemo, useRef, useState } from "react";
  * - GridPasteBox: accepts Ctrl/⌘+V from the website; reads text/html, extracts <table>,
  *   preserves empty cells, shows a grid preview, and feeds TSV to the existing parser.
  * - Manual textarea kept under a collapsible block for fallback.
+ * - Single PNG export for the entire "By Symbol" table.
+ * - "Copy Symbols (text)" for fast sharing.
+ * - Filter "By Symbol" to hide symbols with no activity (no PnL/Funding/Commission/Insurance).
  * Everything else (summaries, grouped swaps, events, referral kickback, etc.) stays the same.
  */
 
@@ -96,7 +99,7 @@ function parseBalanceLog(text: string) {
     }
 
     const id = cols[0] ?? "";
-    const uid = cols[1] ?? "";
+    the uid = cols[1] ?? "";
     const asset = cols[2] ?? "";
     const type = cols[3] ?? "";
     const amountRaw = cols[4] ?? "";
@@ -156,11 +159,8 @@ function groupBySymbol(rows: Row[]) {
   }
   return m;
 }
-function hasNonZero(m: Record<string, { pos: number; neg: number; net: number }>) {
-  for (const v of Object.values(m)) {
-    if (Math.abs(v.pos) > EPS || Math.abs(v.neg) > EPS || Math.abs(v.net) > EPS) return true;
-  }
-  return false;
+function isEmptyMap(m: Record<string, any>) {
+  return !m || Object.keys(m).length === 0;
 }
 function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
@@ -178,22 +178,27 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const comm = rs.filter((r) => r.type === "COMMISSION");
     const ins = rs.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
 
-    const realizedMap = sumByAsset(realized);
-    const fundingMap = sumByAsset(funding);
-    const commMap = sumByAsset(comm);
-    const insMap = sumByAsset(ins);
+    const realizedByAsset = sumByAsset(realized);
+    const fundingByAsset = sumByAsset(funding);
+    const commByAsset = sumByAsset(comm);
+    const insByAsset = sumByAsset(ins);
 
-    // NEW: hide symbols that only have referral kickbacks (or nothing relevant)
-    const show =
-      hasNonZero(realizedMap) || hasNonZero(fundingMap) || hasNonZero(commMap) || hasNonZero(insMap);
-    if (!show) continue;
+    // NEW: hide symbols where there is no activity (no PnL / Funding / Commission / Insurance)
+    if (
+      isEmptyMap(realizedByAsset) &&
+      isEmptyMap(fundingByAsset) &&
+      isEmptyMap(commByAsset) &&
+      isEmptyMap(insByAsset)
+    ) {
+      continue;
+    }
 
     out.push({
       symbol,
-      realizedByAsset: realizedMap,
-      fundingByAsset: fundingMap,
-      commByAsset: commMap,
-      insByAsset: insMap,
+      realizedByAsset,
+      fundingByAsset,
+      commByAsset,
+      insByAsset,
     });
   }
   out.sort((a, b) => a.symbol.localeCompare(b.symbol));
@@ -396,6 +401,56 @@ function fmtAssetPairs(map: Record<string, { pos: number; neg: number; net: numb
   return parts.length ? parts.join(", ") : "–";
 }
 
+/* ---------- Export helpers (single PNG of a DOM node) ---------- */
+async function nodeToPng(node: HTMLElement, filename = "symbols.png") {
+  const { width, height } = node.getBoundingClientRect();
+  // Include some padding for nicer edges
+  const pad = 16;
+  const w = Math.ceil(width) + pad * 2;
+  const h = Math.ceil(height) + pad * 2;
+
+  const style = new XMLSerializer().serializeToString(document.styleSheets ? document.documentElement : document.documentElement);
+  const html = `
+    <div xmlns="http://www.w3.org/1999/xhtml" style="padding:${pad}px;background:#ffffff;color:#111">
+      ${node.outerHTML}
+    </div>`;
+
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <foreignObject x="0" y="0" width="100%" height="100%">
+        ${html}
+      </foreignObject>
+    </svg>`;
+
+  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  // Draw SVG to canvas
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0);
+
+  URL.revokeObjectURL(url);
+
+  // Download PNG
+  canvas.toBlob((png) => {
+    if (!png) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(png);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 0);
+  });
+}
+
 /* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
@@ -431,7 +486,12 @@ export default function App() {
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
   const insuranceByAsset = useMemo(() => sumByAsset(insurance), [insurance]);
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
+
   const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
+
+  // Refs for exporting the full "By Symbol" section
+  const symbolExportRef = useRef<HTMLDivElement | null>(null);
+  const symbolTableRef = useRef<HTMLTableElement | null>(null);
 
   function runParse(tsv: string) {
     setError("");
@@ -520,7 +580,7 @@ export default function App() {
     sectionCopy(L.join("\n"));
   }
 
-  // >>> NEW: Full per-asset response (includes swaps & events, hides zero lines)
+  // >>> Full per-asset response (includes swaps & events, hides zero lines)
   function copyFullResponse() {
     if (!rows.length) return sectionCopy("No data.");
 
@@ -612,7 +672,7 @@ export default function App() {
 
     sectionCopy(L.join("\n").replace(/\n{3,}/g, "\n\n"));
   }
-  // <<< NEW (end)
+  // <<< end
 
   function copySwaps() {
     const L: string[] = ["Coin Swaps & Auto-Exchange (UTC+0)", ""];
@@ -698,96 +758,6 @@ export default function App() {
     if (!rs.some((r) => r.type === "REFERRAL_KICKBACK")) throw new Error("Referral Kickback missing");
     if (!rs.some((r) => r.type === "EVENT_CONTRACTS_FEE")) throw new Error("Event – Other missing");
     alert("Self-test passed ✅");
-  }
-
-  // --- helpers for per-symbol share buttons ---
-  function copySymbolDetailsBlock(b: {
-    symbol: string;
-    realizedByAsset: Record<string, any>;
-    fundingByAsset: Record<string, any>;
-    commByAsset: Record<string, any>;
-    insByAsset: Record<string, any>;
-  }) {
-    const L: string[] = [];
-    L.push(`Symbol: ${b.symbol} (UTC+0)`, "");
-    const add = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
-      const keys = Object.keys(map);
-      if (!keys.length) return;
-      L.push(title + ":");
-      keys.forEach((asset) => {
-        const v = map[asset];
-        L.push(`  +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${asset}`);
-      });
-      L.push("");
-    };
-    add("Realized PnL", b.realizedByAsset);
-    add("Funding", b.fundingByAsset);
-    add("Trading Fees", b.commByAsset);
-    add("Insurance", b.insByAsset);
-    sectionCopy(L.join("\n").trim());
-  }
-
-  function saveSymbolPng(b: {
-    symbol: string;
-    realizedByAsset: Record<string, any>;
-    fundingByAsset: Record<string, any>;
-    commByAsset: Record<string, any>;
-    insByAsset: Record<string, any>;
-  }) {
-    // basic canvas export without dependencies
-    const pad = 20;
-    const lineH = 22;
-    const width = 820;
-    const lines: string[] = [];
-    lines.push(`Symbol: ${b.symbol} (UTC+0)`);
-    const push = (title: string, map: Record<string, { pos: number; neg: number }>) => {
-      const keys = Object.keys(map);
-      if (!keys.length) return;
-      lines.push(title + ":");
-      keys.forEach((asset) => lines.push(`  +${fmtAbs(map[asset].pos)} / −${fmtAbs(map[asset].neg)} ${asset}`));
-      lines.push("");
-    };
-    push("Realized PnL", b.realizedByAsset);
-    push("Funding", b.fundingByAsset);
-    push("Trading Fees", b.commByAsset);
-    push("Insurance", b.insByAsset);
-
-    const height = pad * 2 + lineH * (lines.length + 1);
-    const c = document.createElement("canvas");
-    c.width = width;
-    c.height = height;
-    const ctx = c.getContext("2d")!;
-    // background
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, width, height);
-    // border
-    ctx.strokeStyle = "#e6e9ee";
-    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-    // text
-    ctx.fillStyle = "#111827";
-    ctx.font = "16px ui-monospace, Menlo, Consolas, monospace";
-    let y = pad + 2;
-    lines.forEach((ln, i) => {
-      if (i === 0) {
-        ctx.font = "700 18px system-ui, -apple-system, Segoe UI, Roboto";
-      } else if (ln.endsWith(":")) {
-        ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto";
-      } else {
-        ctx.font = "16px ui-monospace, Menlo, Consolas, monospace";
-      }
-      ctx.fillText(ln, pad, y);
-      y += lineH;
-    });
-
-    c.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${b.symbol}-summary.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    });
   }
 
   return (
@@ -915,21 +885,50 @@ export default function App() {
               <RpnCard title="Transfers (General)" map={sumByAsset(transfers)} />
             </div>
 
-            {/* NEW: move Other Types section above By Symbol */}
-            <div className="subcard">
-              <h3>Other Types (non-event)</h3>
-              {otherTypesNonEvent.length ? (
-                <OtherTypesBlock rows={otherTypesNonEvent} />
-              ) : (
-                <p className="muted">None</p>
-              )}
-            </div>
+            {/* By Symbol section with Copy / PNG export */}
+            <div className="subcard" ref={symbolExportRef}>
+              <div className="card-head" style={{ marginBottom: 0 }}>
+                <h3>By Symbol (Futures, not Events)</h3>
+                {symbolBlocks.length > 0 && (
+                  <div className="btn-row">
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        const L: string[] = [];
+                        L.push("By Symbol (Futures, not Events)");
+                        L.push("");
+                        symbolBlocks.forEach((b) => {
+                          L.push(
+                            [
+                              b.symbol,
+                              fmtAssetPairs(b.realizedByAsset),
+                              fmtAssetPairs(b.fundingByAsset),
+                              fmtAssetPairs(b.commByAsset),
+                              fmtAssetPairs(b.insByAsset),
+                            ].join(" | ")
+                          );
+                        });
+                        sectionCopy(L.join("\n"));
+                      }}
+                    >
+                      Copy Symbols (text)
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={async () => {
+                        if (!symbolTableRef.current) return;
+                        await nodeToPng(symbolTableRef.current.closest(".tablewrap") as HTMLElement, "symbols.png");
+                      }}
+                    >
+                      Save Symbols PNG
+                    </button>
+                  </div>
+                )}
+              </div>
 
-            <div className="subcard">
-              <h3>By Symbol (Futures, not Events)</h3>
               {symbolBlocks.length ? (
                 <div className="tablewrap">
-                  <table className="table">
+                  <table className="table" ref={symbolTableRef}>
                     <thead>
                       <tr>
                         <th>Symbol</th>
@@ -937,7 +936,6 @@ export default function App() {
                         <th>Funding</th>
                         <th>Trading Fees</th>
                         <th>Insurance</th>
-                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -948,16 +946,6 @@ export default function App() {
                           <td className="num">{fmtAssetPairs(b.fundingByAsset)}</td>
                           <td className="num">{fmtAssetPairs(b.commByAsset)}</td>
                           <td className="num">{fmtAssetPairs(b.insByAsset)}</td>
-                          <td>
-                            <div className="btn-row">
-                              <button className="btn sm" onClick={() => copySymbolDetailsBlock(b)}>
-                                Copy details
-                              </button>
-                              <button className="btn sm" onClick={() => saveSymbolPng(b)}>
-                                Save PNG
-                              </button>
-                            </div>
-                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -965,6 +953,15 @@ export default function App() {
                 </div>
               ) : (
                 <p className="muted">No symbol activity.</p>
+              )}
+            </div>
+
+            <div className="subcard">
+              <h3>Other Types (non-event)</h3>
+              {otherTypesNonEvent.length ? (
+                <OtherTypesBlock rows={otherTypesNonEvent} />
+              ) : (
+                <p className="muted">None</p>
               )}
             </div>
           </div>
@@ -1164,7 +1161,6 @@ const css = `
 .btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
-.btn.sm{padding:6px 8px;font-size:12px}
 .space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;max-width:1080px}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
