@@ -156,6 +156,12 @@ function groupBySymbol(rows: Row[]) {
   }
   return m;
 }
+function hasNonZero(m: Record<string, { pos: number; neg: number; net: number }>) {
+  for (const v of Object.values(m)) {
+    if (Math.abs(v.pos) > EPS || Math.abs(v.neg) > EPS || Math.abs(v.net) > EPS) return true;
+  }
+  return false;
+}
 function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
   const out: Array<{
@@ -172,12 +178,22 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const comm = rs.filter((r) => r.type === "COMMISSION");
     const ins = rs.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
 
+    const realizedMap = sumByAsset(realized);
+    const fundingMap = sumByAsset(funding);
+    const commMap = sumByAsset(comm);
+    const insMap = sumByAsset(ins);
+
+    // NEW: hide symbols that only have referral kickbacks (or nothing relevant)
+    const show =
+      hasNonZero(realizedMap) || hasNonZero(fundingMap) || hasNonZero(commMap) || hasNonZero(insMap);
+    if (!show) continue;
+
     out.push({
       symbol,
-      realizedByAsset: sumByAsset(realized),
-      fundingByAsset: sumByAsset(funding),
-      commByAsset: sumByAsset(comm),
-      insByAsset: sumByAsset(ins),
+      realizedByAsset: realizedMap,
+      fundingByAsset: fundingMap,
+      commByAsset: commMap,
+      insByAsset: insMap,
     });
   }
   out.sort((a, b) => a.symbol.localeCompare(b.symbol));
@@ -579,15 +595,15 @@ export default function App() {
         pushIf(f.neg > EPS, `  Funding Fee Paid in ${asset}: −${fmtAbs(f.neg)}`);
       }
       if (i) {
-        pushIf(i.pos > EPS, `  Liquidation Clearance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
-        pushIf(i.neg > EPS, `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
+        pushIf(i.pos > EPS, `  Liquidation Clerarance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
+        pushIf(i.neg > EPS, `  Liquidation Clerarance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
       }
       if (sw) {
         pushIf(sw.pos > EPS, `  The Coin-Swap Received ${asset}: +${fmtAbs(sw.pos)}`);
         pushIf(sw.neg > EPS, `  The Coin-Swap Used ${asset}: −${fmtAbs(sw.neg)}`);
       }
-      if (ep) pushIf(ep.pos > EPS, `  The Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
-      if (eo) pushIf(eo.neg > EPS, `  The Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
+      if (ep) pushIf(ep.pos > EPS, `  The Event Contacts Payout ${asset}: +${fmtAbs(ep.pos)}`);
+      if (eo) pushIf(eo.neg > EPS, `  The Event Contacts Order ${asset}: −${fmtAbs(eo.neg)}`);
 
       const net = total[asset] ?? 0;
       pushIf(Math.abs(net) > EPS, `  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
@@ -684,6 +700,96 @@ export default function App() {
     alert("Self-test passed ✅");
   }
 
+  // --- helpers for per-symbol share buttons ---
+  function copySymbolDetailsBlock(b: {
+    symbol: string;
+    realizedByAsset: Record<string, any>;
+    fundingByAsset: Record<string, any>;
+    commByAsset: Record<string, any>;
+    insByAsset: Record<string, any>;
+  }) {
+    const L: string[] = [];
+    L.push(`Symbol: ${b.symbol} (UTC+0)`, "");
+    const add = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
+      const keys = Object.keys(map);
+      if (!keys.length) return;
+      L.push(title + ":");
+      keys.forEach((asset) => {
+        const v = map[asset];
+        L.push(`  +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${asset}`);
+      });
+      L.push("");
+    };
+    add("Realized PnL", b.realizedByAsset);
+    add("Funding", b.fundingByAsset);
+    add("Trading Fees", b.commByAsset);
+    add("Insurance", b.insByAsset);
+    sectionCopy(L.join("\n").trim());
+  }
+
+  function saveSymbolPng(b: {
+    symbol: string;
+    realizedByAsset: Record<string, any>;
+    fundingByAsset: Record<string, any>;
+    commByAsset: Record<string, any>;
+    insByAsset: Record<string, any>;
+  }) {
+    // basic canvas export without dependencies
+    const pad = 20;
+    const lineH = 22;
+    const width = 820;
+    const lines: string[] = [];
+    lines.push(`Symbol: ${b.symbol} (UTC+0)`);
+    const push = (title: string, map: Record<string, { pos: number; neg: number }>) => {
+      const keys = Object.keys(map);
+      if (!keys.length) return;
+      lines.push(title + ":");
+      keys.forEach((asset) => lines.push(`  +${fmtAbs(map[asset].pos)} / −${fmtAbs(map[asset].neg)} ${asset}`));
+      lines.push("");
+    };
+    push("Realized PnL", b.realizedByAsset);
+    push("Funding", b.fundingByAsset);
+    push("Trading Fees", b.commByAsset);
+    push("Insurance", b.insByAsset);
+
+    const height = pad * 2 + lineH * (lines.length + 1);
+    const c = document.createElement("canvas");
+    c.width = width;
+    c.height = height;
+    const ctx = c.getContext("2d")!;
+    // background
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    // border
+    ctx.strokeStyle = "#e6e9ee";
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+    // text
+    ctx.fillStyle = "#111827";
+    ctx.font = "16px ui-monospace, Menlo, Consolas, monospace";
+    let y = pad + 2;
+    lines.forEach((ln, i) => {
+      if (i === 0) {
+        ctx.font = "700 18px system-ui, -apple-system, Segoe UI, Roboto";
+      } else if (ln.endsWith(":")) {
+        ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto";
+      } else {
+        ctx.font = "16px ui-monospace, Menlo, Consolas, monospace";
+      }
+      ctx.fillText(ln, pad, y);
+      y += lineH;
+    });
+
+    c.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${b.symbol}-summary.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
   return (
     <div className="wrap">
       <style>{css}</style>
@@ -771,7 +877,6 @@ export default function App() {
           <div className="card">
             <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Summary (UTC+0)</h2>
-              {/* kept layout: just add a second button next to existing one */}
               <div className="btn-row">
                 <button className="btn btn-success" onClick={copySummary}>
                   Copy Summary (no Swaps)
@@ -810,9 +915,19 @@ export default function App() {
               <RpnCard title="Transfers (General)" map={sumByAsset(transfers)} />
             </div>
 
+            {/* NEW: move Other Types section above By Symbol */}
+            <div className="subcard">
+              <h3>Other Types (non-event)</h3>
+              {otherTypesNonEvent.length ? (
+                <OtherTypesBlock rows={otherTypesNonEvent} />
+              ) : (
+                <p className="muted">None</p>
+              )}
+            </div>
+
             <div className="subcard">
               <h3>By Symbol (Futures, not Events)</h3>
-              {bySymbolSummary(nonEvent).length ? (
+              {symbolBlocks.length ? (
                 <div className="tablewrap">
                   <table className="table">
                     <thead>
@@ -822,16 +937,27 @@ export default function App() {
                         <th>Funding</th>
                         <th>Trading Fees</th>
                         <th>Insurance</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {bySymbolSummary(nonEvent).map((b) => (
+                      {symbolBlocks.map((b) => (
                         <tr key={b.symbol}>
                           <td className="label">{b.symbol}</td>
                           <td className="num">{fmtAssetPairs(b.realizedByAsset)}</td>
                           <td className="num">{fmtAssetPairs(b.fundingByAsset)}</td>
                           <td className="num">{fmtAssetPairs(b.commByAsset)}</td>
                           <td className="num">{fmtAssetPairs(b.insByAsset)}</td>
+                          <td>
+                            <div className="btn-row">
+                              <button className="btn sm" onClick={() => copySymbolDetailsBlock(b)}>
+                                Copy details
+                              </button>
+                              <button className="btn sm" onClick={() => saveSymbolPng(b)}>
+                                Save PNG
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -839,15 +965,6 @@ export default function App() {
                 </div>
               ) : (
                 <p className="muted">No symbol activity.</p>
-              )}
-            </div>
-
-            <div className="subcard">
-              <h3>Other Types (non-event)</h3>
-              {otherTypesNonEvent.length ? (
-                <OtherTypesBlock rows={otherTypesNonEvent} />
-              ) : (
-                <p className="muted">None</p>
               )}
             </div>
           </div>
@@ -1047,6 +1164,7 @@ const css = `
 .btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
+.btn.sm{padding:6px 8px;font-size:12px}
 .space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;max-width:1080px}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
