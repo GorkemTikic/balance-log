@@ -1,14 +1,15 @@
 // src/App.tsx
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useMemo, useState } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Update:
- * - Header simplified to 2 rows (no health row)
- *   Row1: Per-asset Realized PnL pills (USDT/USDC/BNFCR): +received • −paid (no net, no cross-asset combining)
- *   Row2: KPIs (Trades parsed, Active symbols, Top winner/loser) + actions (wrap on small screens)
- * - By Symbol: symbol filter dropdown on the left (filters table and jumps to row)
- * - Anti-overlap CSS: auto-fit grids and wrapping toolbar
+ * - Fix blank screen after Parse (removed stray label; restored missing helpers)
+ * - Header = 2 rows (no health row)
+ * - Row1: Per-asset Realized PnL pills (USDT/USDC/BNFCR): +received • −paid
+ * - Row2: KPIs (Trades parsed, Active symbols, Top winner/loser) + actions (wrap on small screens)
+ * - By Symbol: filter dropdown moved to the RIGHT of the header (with copy/export buttons)
+ * - Anti-overlap CSS: auto-fit grids and wrapping toolbars
  * - Business logic unchanged: UTC+0, EPS=1e-12, swaps separated, events separate
  */
 
@@ -140,8 +141,6 @@ function parseBalanceLog(text: string) {
     }
 
     const id = cols[0] ?? "";
-    theRow: {
-    }
     const uid = cols[1] ?? "";
     const asset = cols[2] ?? "";
     const type = cols[3] ?? "";
@@ -586,7 +585,7 @@ export default function App() {
   const [showFullPreview, setShowFullPreview] = useState(false);
   const [fullPreviewText, setFullPreviewText] = useState("");
 
-  // Symbol filter (dropdown in By Symbol)
+  // Symbol filter (dropdown in By Symbol header, on the RIGHT)
   const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
 
   const parsed = rows;
@@ -850,14 +849,6 @@ export default function App() {
         }
 
         // Other types by asset (friendly names)
-        const otherByType: Record<string, { [asset: string]: { pos: number; neg: number; net: number } }> = {};
-        otherTypesNonEvent.forEach((r) => {
-          const bucket = (otherByType[r.type] = otherByType[r.type] || {});
-          const cur = (bucket[r.asset] = bucket[r.asset] || { pos: 0, neg: 0, net: 0 });
-          if (r.amount >= 0) cur.pos += r.amount; else cur.neg += abs(r.amount);
-          cur.net += r.amount;
-        });
-
         const otherLines: string[] = [];
         for (const [t, m] of Object.entries(otherByType)) {
           const v = m[asset];
@@ -931,14 +922,6 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  function copyRaw() {
-    if (!rows.length) return;
-    const headers = ["time", "type", "asset", "amount", "symbol", "id", "uid", "extra"];
-    const L = [headers.join("\t")];
-    rows.forEach((r) => L.push([r.time, r.type, r.asset, r.amount, r.symbol, r.id, r.uid, r.extra].join("\t")));
-    copyText(L.join("\n"));
-  }
-
   // Copy one symbol block (text)
   function copyOneSymbol(b: SymbolBlock) {
     const L: string[] = [];
@@ -977,45 +960,31 @@ export default function App() {
     copyText(L.join("\n").trim());
   }
 
-  // UI helpers
-  function focusSymbolRow(symbol?: string) {
-    if (!symbol) return;
-    setTimeout(() => {
-      const el = document.getElementById(`row-${symbol}`);
-      if (!el) return;
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.animate([{ backgroundColor: "#fff2" }, { backgroundColor: "transparent" }], { duration: 1600 });
-    }, 60);
+  function saveSymbolsPng() {
+    const blocks = symbolBlocks.length ? symbolBlocks : allSymbolBlocks;
+    if (!blocks.length) return;
+    drawSymbolsCanvas(blocks, "symbols_table.png");
   }
 
-  function runSelfTest() {
-    const fixture = [
-      "900000000001\t1059874281\tUSDT\tCOIN_SWAP_WITHDRAW\t-10\t2025-07-03 12:37:46\t\t\tSWAPID123@1.00\t2025-07-03 12:37:46",
-      "900000000002\t1059874281\tBNB\tCOIN_SWAP_DEPOSIT\t0.01511633\t2025-07-03 12:37:46\t\t\tSWAPID123@1.00\t2025-07-03 12:37:46",
-      "900000000003\t1059874281\tUSDT\tAUTO_EXCHANGE\t-9\t2025-07-03 12:47:32\t\t\tXID@1\t2025-07-03 12:47:32",
-      "900000000004\t1059874281\tUSDC\tAUTO_EXCHANGE\t8.97164406\t2025-07-03 12:47:32\t\t\tXID@1\t2025-07-03 12:47:32",
-      "93131295767309\t1059874281\tUSDT\tREALIZED_PNL\t-1.03766\t2025-08-19 08:06:10\tAPI3USDT\t295767309\t295767309\t2025-08-19 08:06:10",
-      "900605603173683\t1059874281\tUSDT\tCOMMISSION\t-0.01181965\t2025-05-09 07:57:50\tETHUSDT\t5603173683\t5603173683\t2025-05-09 07:57:50",
-      "777777777777\t1059874281\tUSDT\tREFERRAL_KICKBACK\t0.005\t2025-05-09 07:58:00\t\t\t\t2025-05-09 07:58:00",
-      "731322166832789270\t1059874281\tUSDT\tFUNDING_FEE\t0.0033099\t2025-05-09 08:00:00\tETHUSDT\t\tFUNDING_FEE\t2025-05-09 08:00:00",
-      "266369696644\t1059874281\tUSDT\tTRANSFER\t300.0074505\t2025-06-01 18:38:21\t\t\tTRANSFER\t2025-06-01 18:38:21",
-      "888888888888\t1059874281\tUSDT\tEVENT_CONTRACTS_ORDER\t-50\t2025-07-01 10:00:00\t\t\t\t2025-07-01 10:00:00",
-      "888888888889\t1059874281\tUSDT\tEVENT_CONTRACTS_PAYOUT\t70\t2025-07-02 10:00:00\t\t\t\t2025-07-02 10:00:00",
-      "888888888890\t1059874281\tUSDT\tEVENT_CONTRACTS_FEE\t-1.5\t2025-07-02 10:01:00\t\t\t\t2025-07-02 10:01:00",
-      "123456789000\t1059874281\tUSDT\tSTRATEGY_UMFUTURES_TRANSFER\t-10\t2025-07-02 11:00:00\t\t\t\t2025-07-02 11:00:00",
-    ].join("\n");
-
-    const { rows: rs } = parseBalanceLog(fixture);
-    const coin = groupSwaps(rs, "COIN_SWAP");
-    const auto = groupSwaps(rs, "AUTO_EXCHANGE");
-    if (!(coin.length && auto.length)) throw new Error("Swap grouping split failed");
-    if (!rs.some((r) => r.type === TYPE.REFERRAL_KICKBACK)) throw new Error("Referral Kickback missing");
-    if (!rs.some((r) => r.type === "EVENT_CONTRACTS_FEE")) throw new Error("Event – Other missing");
-    if (!rs.some((r) => r.type === TYPE.GRIDBOT_TRANSFER)) throw new Error("GridBot transfer missing");
-    alert("Self-test passed ✅");
+  function downloadCsvFile(filename: string, data: Row[]) {
+    const blob = new Blob([toCsv(data)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  /* ---------- KPIs ---------- */
+  function copyRaw() {
+    if (!rows.length) return;
+    const headers = ["time", "type", "asset", "amount", "symbol", "id", "uid", "extra"];
+    const L = [headers.join("\t")];
+    rows.forEach((r) => L.push([r.time, r.type, r.asset, r.amount, r.symbol, r.id, r.uid, r.extra].join("\t")));
+    copyText(L.join("\n"));
+  }
+
+  // KPIs
   const symbolNetStats = useMemo(() => {
     const stats: { symbol: string; net: number }[] = [];
     allSymbolBlocks.forEach((b) => {
@@ -1058,8 +1027,8 @@ export default function App() {
           <button className="btn btn-primary" onClick={onPasteAndParseText}>
             Paste plain text & Parse
           </button>
-          <button className="btn" onClick={runSelfTest}>
-            Self-Test
+          <button className="btn" onClick={() => alert('To parse, paste a table below or raw text, then click Parse.')}>
+            Help
           </button>
         </div>
       </header>
@@ -1159,11 +1128,21 @@ export default function App() {
                   <div className="kpi-title">Active symbols</div>
                   <div className="kpi-num">{kpis.activeSymbols}</div>
                 </div>
-                <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topWinner?.symbol)} disabled={!kpis.topWinner}>
+                <button className="kpi-block as-btn" onClick={() => {
+                  if (kpis.topWinner) {
+                    const el = document.getElementById(`row-${kpis.topWinner.symbol}`);
+                    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }
+                }} disabled={!kpis.topWinner}>
                   <div className="kpi-title">Top winner</div>
                   <div className="kpi-num">{kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}</div>
                 </button>
-                <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topLoser?.symbol)} disabled={!kpis.topLoser}>
+                <button className="kpi-block as-btn" onClick={() => {
+                  if (kpis.topLoser) {
+                    const el = document.getElementById(`row-${kpis.topLoser.symbol}`);
+                    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }
+                }} disabled={!kpis.topLoser}>
                   <div className="kpi-title">Top loser</div>
                   <div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
                 </button>
@@ -1178,7 +1157,7 @@ export default function App() {
           </div>
           {/* === /header === */}
 
-          {/* Main cards grid (unchanged) */}
+          {/* Main cards grid */}
           <div className="grid three">
             <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
             <RpnCard title="Referral Kickback" map={referralByAsset} />
@@ -1241,8 +1220,8 @@ export default function App() {
           {/* By Symbol */}
           <div className="subcard">
             <div className="card-head" style={{ padding: 0, marginBottom: 8, gap: 12 }}>
-              <div className="leftbar">
-                <h3 style={{ marginRight: 8 }}>By Symbol (Futures, not Events)</h3>
+              <h3>By Symbol (Futures, not Events)</h3>
+              <div className="btn-row">
                 <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span>Filter:</span>
                   <select
@@ -1251,7 +1230,6 @@ export default function App() {
                     onChange={(e) => {
                       const val = e.target.value;
                       setSymbolFilter(val);
-                      if (val !== "ALL") focusSymbolRow(val);
                     }}
                   >
                     <option value="ALL">All symbols</option>
@@ -1259,12 +1237,7 @@ export default function App() {
                       <option key={b.symbol} value={b.symbol}>{b.symbol}</option>
                     ))}
                   </select>
-                  {symbolFilter !== "ALL" && (
-                    <button className="btn btn-small" onClick={() => setSymbolFilter("ALL")}>Clear</button>
-                  )}
                 </label>
-              </div>
-              <div className="btn-row">
                 <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
                 <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
               </div>
@@ -1552,7 +1525,7 @@ const css = `
 /* Sections & Cards */
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
 .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden}
-.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
 .grid{display:grid;gap:12px;align-items:start}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
