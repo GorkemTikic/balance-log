@@ -1,10 +1,11 @@
 // src/App.tsx
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * - Summary cards in a clean responsive grid (no overlap)
- * - By Symbol with per-row Copy + Save PNG and a single "Save Symbols PNG" (tall image)
+ * - NEW: Sticky KPI header with quick totals + Copy actions
+ * - NEW: Dual-Pane Summary (resizable) — left: summary cards, right: By Symbol
+ * - By Symbol keeps per-row Copy + Save PNG and “Save Symbols PNG” (tall image)
  * - Auto-Exchange and Coin Swaps are handled and reported separately
  * - Full Response preview/edit includes Transfers, GridBot Transfers, and Other Types (friendly names)
  * - Zero-suppression EPS = 1e-12, all times UTC+0
@@ -97,7 +98,6 @@ function titleCaseWords(s: string) {
     .join(" ");
 }
 function friendlyTypeName(t: string) {
-  // special cases, else: title-case the snake name
   const map: Record<string, string> = {
     CASH_COUPON: "Cash Coupon",
     WELCOME_BONUS: "Welcome Bonus",
@@ -550,7 +550,6 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
     ];
 
     values.forEach((val, idx) => {
-      // split to color good/bad tokens
       const tokens = val.split(/( [+,−][0-9.]+ [A-Z0-9]+)(?=,|$)/g).filter(Boolean);
       let tx = cx + 6;
       ctx.font = "12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
@@ -573,6 +572,75 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
 
 function drawSingleRowCanvas(block: SymbolBlock) {
   drawSymbolsCanvas([block], `${block.symbol}.png`);
+}
+
+/* ---------- Dual Pane (resizable) ---------- */
+function usePersistentRatio(key: string, initial = 0.52) {
+  const [ratio, setRatio] = useState<number>(() => {
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) && v > 0.2 && v < 0.8 ? v : initial;
+  });
+  useEffect(() => {
+    localStorage.setItem(key, String(ratio));
+  }, [key, ratio]);
+  return [ratio, setRatio] as const;
+}
+
+function DualPane({
+  left,
+  right,
+  storageKey = "dualpane_ratio",
+}: {
+  left: React.ReactNode;
+  right: React.ReactNode;
+  storageKey?: string;
+}) {
+  const [ratio, setRatio] = usePersistentRatio(storageKey, 0.55);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef(false);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragRef.current || !wrapRef.current) return;
+      const r = wrapRef.current.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const next = Math.min(0.78, Math.max(0.22, x / r.width));
+      setRatio(next);
+    }
+    function up() {
+      dragRef.current = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [setRatio]);
+
+  return (
+    <div className="dual" ref={wrapRef}>
+      <div className="pane left" style={{ width: `${ratio * 100}%` }}>
+        {left}
+      </div>
+      <div
+        className="splitter"
+        onMouseDown={() => {
+          dragRef.current = true;
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "col-resize";
+        }}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panes"
+      />
+      <div className="pane right" style={{ width: `${(1 - ratio) * 100}%` }}>
+        {right}
+      </div>
+    </div>
+  );
 }
 
 /* ---------- main app ---------- */
@@ -603,6 +671,8 @@ export default function App() {
   const gridbotTransfers = useMemo(() => parsed.filter((r) => r.type === TYPE.GRIDBOT_TRANSFER), [parsed]);
 
   // swaps split
+  theCoinSwaps: {
+  }
   const coinSwapLines = useMemo(() => groupSwaps(parsed, "COIN_SWAP"), [parsed]);
   const autoExLines = useMemo(() => groupSwaps(parsed, "AUTO_EXCHANGE"), [parsed]);
 
@@ -1003,6 +1073,29 @@ export default function App() {
     alert("Self-test passed ✅");
   }
 
+  /* ---------- KPI header (sticky) ---------- */
+  const kpi = useMemo(() => {
+    const sum = (m: Record<string, { pos: number; neg: number; net: number }>) =>
+      Object.values(m).reduce(
+        (a, v) => ({ pos: a.pos + v.pos, neg: a.neg + v.neg, net: a.net + v.net }),
+        { pos: 0, neg: 0, net: 0 }
+      );
+    return {
+      realized: sum(realizedByAsset),
+      fees: sum(commissionByAsset),
+      funding: sum(fundingByAsset),
+      transfers: sum(transfersByAsset),
+      gridbot: sum(gridbotByAsset),
+      eventsNet: (() => {
+        const orders = events.filter((r) => r.type === TYPE.EVENT_ORDER);
+        const payouts = events.filter((r) => r.type === TYPE.EVENT_PAYOUT);
+        const so = Object.values(sumByAsset(orders)).reduce((n, v) => n + v.net, 0);
+        const sp = Object.values(sumByAsset(payouts)).reduce((n, v) => n + v.net, 0);
+        return so + sp;
+      })(),
+    };
+  }, [realizedByAsset, commissionByAsset, fundingByAsset, transfersByAsset, gridbotByAsset, events]);
+
   return (
     <div className="wrap">
       <style>{css}</style>
@@ -1088,147 +1181,178 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          <div className="card">
-            <div className="card-head" style={{ justifyContent: "space-between" }}>
-              <h2>Summary (UTC+0)</h2>
-              <div className="btn-row">
-                <button className="btn btn-success" onClick={copySummary}>
-                  Copy Summary (no Swaps)
-                </button>
-                <button className="btn" onClick={copyFullResponse}>
-                  Copy Response (Full)
-                </button>
-                <button className="btn" onClick={openFullPreview}>
-                  Preview/Edit Full Response
-                </button>
+          {/* Sticky KPI header */}
+          <div className="kpi sticky card">
+            <div className="kpi-row">
+              <div className="kpi-block">
+                <div className="kpi-title">Realized PnL</div>
+                <div className={`kpi-num ${kpi.realized.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.realized.net)}</div>
               </div>
-            </div>
-
-            {/* Realized PnL tiles */}
-            <div className="subcard">
-              <h3>Realized PnL (Futures, not Events)</h3>
-              {Object.keys(realizedByAsset).length ? (
-                <ul className="grid two">
-                  {Object.entries(realizedByAsset).map(([asset, v]) => (
-                    <li key={asset} className="pill">
-                      <span className="label">{asset}</span>{" "}
-                      <span className="good">+{fmtAbs(v.pos)}</span> •{" "}
-                      <span className="bad">−{fmtAbs(v.neg)}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">No Realized PnL found.</p>
-              )}
-            </div>
-
-            {/* Main cards grid */}
-            <div className="grid three">
-              <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-              <RpnCard title="Referral Kickback" map={referralByAsset} />
-              <RpnCard title="Funding Fees" map={fundingByAsset} />
-              <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-
-              {/* Transfers grouped */}
-              <div className="card">
-                <div className="card-head">
-                  <h3>Transfers</h3>
-                </div>
-                <div className="stack">
-                  <div className="typecard">
-                    <div className="card-head"><h4>General</h4></div>
-                    <ul className="kv">
-                      {Object.keys(transfersByAsset).length ? (
-                        Object.entries(transfersByAsset).map(([asset, v]) => (
-                          <li key={asset} className="kv-row">
-                            <span className="label">{asset}</span>
-                            <span className="num good">+{fmtAbs(v.pos)}</span>
-                            <span className="num bad">−{fmtAbs(v.neg)}</span>
-                            <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                          </li>
-                        ))
-                      ) : (
-                        <li className="kv-row"><span className="muted">None</span></li>
-                      )}
-                    </ul>
-                  </div>
-
-                  <div className="typecard">
-                    <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
-                    <ul className="kv">
-                      {Object.keys(gridbotByAsset).length ? (
-                        Object.entries(gridbotByAsset).map(([asset, v]) => (
-                          <li key={asset} className="kv-row">
-                            <span className="label">{asset}</span>
-                            <span className="num good">+{fmtAbs(v.pos)}</span>
-                            <span className="num bad">−{fmtAbs(v.neg)}</span>
-                            <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                          </li>
-                        ))
-                      ) : (
-                        <li className="kv-row"><span className="muted">None</span></li>
-                      )}
-                    </ul>
-                  </div>
-                </div>
+              <div className="kpi-block">
+                <div className="kpi-title">Commission</div>
+                <div className={`kpi-num ${kpi.fees.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.fees.net)}</div>
+              </div>
+              <div className="kpi-block">
+                <div className="kpi-title">Funding</div>
+                <div className={`kpi-num ${kpi.funding.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.funding.net)}</div>
+              </div>
+              <div className="kpi-block">
+                <div className="kpi-title">Transfers (Gen)</div>
+                <div className={`kpi-num ${kpi.transfers.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.transfers.net)}</div>
+              </div>
+              <div className="kpi-block">
+                <div className="kpi-title">GridBot</div>
+                <div className={`kpi-num ${kpi.gridbot.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.gridbot.net)}</div>
+              </div>
+              <div className="kpi-block">
+                <div className="kpi-title">Events Net</div>
+                <div className={`kpi-num ${kpi.eventsNet >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.eventsNet)}</div>
               </div>
 
-              {/* Other Types (friendly) */}
-              {otherTypesNonEvent.length > 0 && (
-                <div className="card">
-                  <div className="card-head"><h3>Other Types (non-event)</h3></div>
-                  <OtherTypesBlock rows={otherTypesNonEvent} />
-                </div>
-              )}
-            </div>
-
-            {/* By Symbol */}
-            <div className="subcard">
-              <div className="card-head" style={{ padding: 0, marginBottom: 8 }}>
-                <h3>By Symbol (Futures, not Events)</h3>
-                <div className="btn-row">
-                  <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
-                  <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
-                </div>
+              <div className="kpi-actions btn-row">
+                <button className="btn btn-success" onClick={copySummary}>Copy Summary (no Swaps)</button>
+                <button className="btn" onClick={copyFullResponse}>Copy Response (Full)</button>
+                <button className="btn" onClick={openFullPreview}>Preview/Edit Full Response</button>
               </div>
-
-              {symbolBlocks.length ? (
-                <div className="tablewrap">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Symbol</th>
-                        <th>Realized PnL</th>
-                        <th>Funding</th>
-                        <th>Trading Fees</th>
-                        <th>Insurance</th>
-                        <th className="actions">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {symbolBlocks.map((b) => (
-                        <tr key={b.symbol} id={`row-${b.symbol}`}>
-                          <td className="label">{b.symbol}</td>
-                          <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
-                          <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
-                          <td className="num">{renderAssetPairs(b.commByAsset)}</td>
-                          <td className="num">{renderAssetPairs(b.insByAsset)}</td>
-                          <td className="actions">
-                            <div className="btn-row">
-                              <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                              <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="muted">No symbol activity.</p>
-              )}
             </div>
           </div>
+
+          {/* Dual Pane: left summary / right By Symbol */}
+          <DualPane
+            storageKey="dualpane_summary_ratio"
+            left={
+              <div className="pane-inner">
+                {/* Realized PnL tiles */}
+                <div className="card">
+                  <div className="card-head">
+                    <h3>Realized PnL (Futures, not Events)</h3>
+                  </div>
+                  {Object.keys(realizedByAsset).length ? (
+                    <ul className="grid two">
+                      {Object.entries(realizedByAsset).map(([asset, v]) => (
+                        <li key={asset} className="pill">
+                          <span className="label">{asset}</span>{" "}
+                          <span className="good">+{fmtAbs(v.pos)}</span> •{" "}
+                          <span className="bad">−{fmtAbs(v.neg)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted">No Realized PnL found.</p>
+                  )}
+                </div>
+
+                {/* Main cards grid */}
+                <div className="grid three">
+                  <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+                  <RpnCard title="Referral Kickback" map={referralByAsset} />
+                  <RpnCard title="Funding Fees" map={fundingByAsset} />
+                  <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+
+                  {/* Transfers grouped */}
+                  <div className="card">
+                    <div className="card-head">
+                      <h3>Transfers</h3>
+                    </div>
+                    <div className="stack">
+                      <div className="typecard">
+                        <div className="card-head"><h4>General</h4></div>
+                        <ul className="kv">
+                          {Object.keys(transfersByAsset).length ? (
+                            Object.entries(transfersByAsset).map(([asset, v]) => (
+                              <li key={asset} className="kv-row">
+                                <span className="label">{asset}</span>
+                                <span className="num good">+{fmtAbs(v.pos)}</span>
+                                <span className="num bad">−{fmtAbs(v.neg)}</span>
+                                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="kv-row"><span className="muted">None</span></li>
+                          )}
+                        </ul>
+                      </div>
+
+                      <div className="typecard">
+                        <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
+                        <ul className="kv">
+                          {Object.keys(gridbotByAsset).length ? (
+                            Object.entries(gridbotByAsset).map(([asset, v]) => (
+                              <li key={asset} className="kv-row">
+                                <span className="label">{asset}</span>
+                                <span className="num good">+{fmtAbs(v.pos)}</span>
+                                <span className="num bad">−{fmtAbs(v.neg)}</span>
+                                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="kv-row"><span className="muted">None</span></li>
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Other Types (friendly) */}
+                  {otherTypesNonEvent.length > 0 && (
+                    <div className="card">
+                      <div className="card-head"><h3>Other Types (non-event)</h3></div>
+                      <OtherTypesBlock rows={otherTypesNonEvent} />
+                    </div>
+                  )}
+                </div>
+              </div>
+            }
+            right={
+              <div className="pane-inner">
+                <div className="card">
+                  <div className="card-head">
+                    <h3>By Symbol (Futures, not Events)</h3>
+                    <div className="btn-row">
+                      <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
+                      <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
+                    </div>
+                  </div>
+
+                  {symbolBlocks.length ? (
+                    <div className="tablewrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Symbol</th>
+                            <th>Realized PnL</th>
+                            <th>Funding</th>
+                            <th>Trading Fees</th>
+                            <th>Insurance</th>
+                            <th className="actions sticky-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {symbolBlocks.map((b) => (
+                            <tr key={b.symbol} id={`row-${b.symbol}`}>
+                              <td className="label">{b.symbol}</td>
+                              <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
+                              <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
+                              <td className="num">{renderAssetPairs(b.commByAsset)}</td>
+                              <td className="num">{renderAssetPairs(b.insByAsset)}</td>
+                              <td className="actions sticky-right">
+                                <div className="btn-row">
+                                  <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
+                                  <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="muted">No symbol activity.</p>
+                  )}
+                </div>
+              </div>
+            }
+          />
         </section>
       )}
 
@@ -1457,6 +1581,8 @@ const css = `
 }
 *{box-sizing:border-box} body{margin:0}
 .wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+
+/* Header */
 .header{max-width:1200px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
 .header h1{margin:0 0 2px;font-size:26px}
 .muted{color:var(--muted)}
@@ -1469,25 +1595,33 @@ const css = `
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
 .btn-small{padding:6px 10px}
+
+/* Sections & Cards */
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
-.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden}
+.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden;min-width:0}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
-.grid{display:grid;gap:12px;align-items:start}
+.grid{display:grid;gap:12px;align-items:start;min-width:0}
 .grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
-.pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px}
+.pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}
 .kv{display:grid;gap:8px}
-.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}
 .label{font-weight:600}
-.num{font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+
+/* Paste + diagnostics */
 .paste{width:100%;height:120px;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;background:#fff}
 .error{color:#b91c1c;margin:8px 0 0}
 .diags summary{cursor:pointer;font-weight:600}
 .diagbox{width:100%;height:120px;background:#fbfcfe;border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
+
+/* Tabs */
 .tabs{max-width:1200px;margin:6px auto 0;padding:0 16px;display:flex;gap:8px;flex-wrap:wrap}
 .tab{border:1px solid var(--line);background:#fff;padding:8px 12px;border-radius:999px;cursor:pointer}
 .tab.active{background:var(--dark);border-color:var(--dark);color:#fff}
+
+/* Tables */
 .tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
 .table{width:100%;border-collapse:separate;border-spacing:0}
 .table th,.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
@@ -1500,15 +1634,40 @@ const css = `
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
 .pair{display:inline-block;margin-right:2px}
 .actions{min-width:200px}
+.sticky-right{position:sticky; right:0; background:#fff; box-shadow: -12px 0 10px -10px rgba(0,0,0,.06); z-index:2}
+
+/* Dropzone */
 .dropzone{
   width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
   padding:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);
   text-align:center; user-select:none; outline:none;
 }
 .dropzone:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,98,254,0.15)}
+
 /* Modal overlay */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:1000}
 .modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
+
+/* KPI header */
+.kpi.sticky{position:sticky; top:8px; z-index:5}
+.kpi-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) auto; gap:10px; align-items:center}
+.kpi-block{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0}
+.kpi-title{font-size:12px;color:var(--muted);margin-bottom:4px}
+.kpi-num{font-weight:700}
+
+/* Dual Pane */
+.dual{display:flex; gap:0; border:1px solid var(--line); border-radius:16px; overflow:hidden; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.pane{min-width:0; max-width:100%; display:flex; flex-direction:column}
+.pane-inner{padding:12px}
+.splitter{width:10px; cursor:col-resize; background:linear-gradient(90deg,#f5f7fb,#e9edf5); border-left:1px solid var(--line); border-right:1px solid var(--line)}
+@media (max-width: 980px){
+  .kpi-row{grid-template-columns:repeat(3,minmax(0,1fr)) auto}
+}
+@media (max-width: 720px){
+  .kpi-row{grid-template-columns:repeat(2,minmax(0,1fr)) auto}
+  .dual{flex-direction:column}
+  .splitter{height:10px;width:auto;cursor:row-resize}
+}
 `;
