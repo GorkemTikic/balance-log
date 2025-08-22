@@ -3,12 +3,14 @@ import React, { useMemo, useRef, useState, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * - NEW: Sticky KPI header with quick totals + Copy actions
- * - NEW: Dual-Pane Summary (resizable) — left: summary cards, right: By Symbol
- * - By Symbol keeps per-row Copy + Save PNG and “Save Symbols PNG” (tall image)
- * - Auto-Exchange and Coin Swaps are handled and reported separately
- * - Full Response preview/edit includes Transfers, GridBot Transfers, and Other Types (friendly names)
- * - Zero-suppression EPS = 1e-12, all times UTC+0
+ * NEW:
+ * - 3-row sticky header in Summary tab:
+ *   Row1: Per-asset Realized PnL tiles (USDT/USDC/BNFCR) — no cross-asset mixing
+ *   Row2: KPIs (Trades parsed, Active symbols, Top winner/loser)
+ *   Row3: Health Check chips (clickable insights)
+ * - Row1 tiles act as a filter on the "By Symbol" table (toggle)
+ * - Winner/loser chips scroll to their table row
+ * - All guardrails preserved: UTC+0, EPS=1e-12, transfers counted, swaps vs auto-exchange separate, events separate
  */
 
 type Row = {
@@ -24,7 +26,7 @@ type Row = {
 };
 
 const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0
-const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB)$/;
+const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB|BNFCR)$/;
 
 const TYPE = {
   REALIZED_PNL: "REALIZED_PNL",
@@ -173,7 +175,7 @@ function parseBalanceLog(text: string) {
 }
 
 /* ---------- aggregation ---------- */
-function sumByAsset(rows: Row[]) {
+function sumByAsset<T extends Row>(rows: T[]) {
   const acc: Record<string, { pos: number; neg: number; net: number }> = {};
   for (const r of rows) {
     const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
@@ -201,10 +203,10 @@ function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
   const out: Array<{
     symbol: string;
-    realizedByAsset: Record<string, any>;
-    fundingByAsset: Record<string, any>;
-    commByAsset: Record<string, any>;
-    insByAsset: Record<string, any>;
+    realizedByAsset: Record<string, { pos: number; neg: number }>;
+    fundingByAsset: Record<string, { pos: number; neg: number }>;
+    commByAsset: Record<string, { pos: number; neg: number }>;
+    insByAsset: Record<string, { pos: number; neg: number }>;
   }> = [];
 
   for (const [symbol, rs] of sym.entries()) {
@@ -550,6 +552,7 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
     ];
 
     values.forEach((val, idx) => {
+      // split to color good/bad tokens
       const tokens = val.split(/( [+,−][0-9.]+ [A-Z0-9]+)(?=,|$)/g).filter(Boolean);
       let tx = cx + 6;
       ctx.font = "12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
@@ -574,75 +577,6 @@ function drawSingleRowCanvas(block: SymbolBlock) {
   drawSymbolsCanvas([block], `${block.symbol}.png`);
 }
 
-/* ---------- Dual Pane (resizable) ---------- */
-function usePersistentRatio(key: string, initial = 0.52) {
-  const [ratio, setRatio] = useState<number>(() => {
-    const v = Number(localStorage.getItem(key));
-    return Number.isFinite(v) && v > 0.2 && v < 0.8 ? v : initial;
-  });
-  useEffect(() => {
-    localStorage.setItem(key, String(ratio));
-  }, [key, ratio]);
-  return [ratio, setRatio] as const;
-}
-
-function DualPane({
-  left,
-  right,
-  storageKey = "dualpane_ratio",
-}: {
-  left: React.ReactNode;
-  right: React.ReactNode;
-  storageKey?: string;
-}) {
-  const [ratio, setRatio] = usePersistentRatio(storageKey, 0.55);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef(false);
-
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!dragRef.current || !wrapRef.current) return;
-      const r = wrapRef.current.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      const next = Math.min(0.78, Math.max(0.22, x / r.width));
-      setRatio(next);
-    }
-    function up() {
-      dragRef.current = false;
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", up);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", up);
-    };
-  }, [setRatio]);
-
-  return (
-    <div className="dual" ref={wrapRef}>
-      <div className="pane left" style={{ width: `${ratio * 100}%` }}>
-        {left}
-      </div>
-      <div
-        className="splitter"
-        onMouseDown={() => {
-          dragRef.current = true;
-          document.body.style.userSelect = "none";
-          document.body.style.cursor = "col-resize";
-        }}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize panes"
-      />
-      <div className="pane right" style={{ width: `${(1 - ratio) * 100}%` }}>
-        {right}
-      </div>
-    </div>
-  );
-}
-
 /* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
@@ -650,6 +584,7 @@ export default function App() {
   const [diags, setDiags] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
+  const [filteredAsset, setFilteredAsset] = useState<string | null>(null); // Row1 filter
 
   // Full response preview/edit
   const [showFullPreview, setShowFullPreview] = useState(false);
@@ -671,8 +606,6 @@ export default function App() {
   const gridbotTransfers = useMemo(() => parsed.filter((r) => r.type === TYPE.GRIDBOT_TRANSFER), [parsed]);
 
   // swaps split
-  theCoinSwaps: {
-  }
   const coinSwapLines = useMemo(() => groupSwaps(parsed, "COIN_SWAP"), [parsed]);
   const autoExLines = useMemo(() => groupSwaps(parsed, "AUTO_EXCHANGE"), [parsed]);
 
@@ -692,7 +625,7 @@ export default function App() {
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
   const gridbotByAsset = useMemo(() => sumByAsset(gridbotTransfers), [gridbotTransfers]);
 
-  // For full response: aggregated assets for swaps (separately)
+  // swaps aggregated by asset (for Full text / health checks)
   const coinSwapAggByAsset = useMemo(
     () => sumByAsset(parsed.filter((r) => r.type === TYPE.COIN_SWAP_DEPOSIT || r.type === TYPE.COIN_SWAP_WITHDRAW)),
     [parsed]
@@ -703,7 +636,13 @@ export default function App() {
   );
 
   // Symbol table blocks (filtered: no-only-referral symbols)
-  const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
+  const allSymbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
+
+  // Filter table by Row1 tile (asset)
+  const symbolBlocks = useMemo(() => {
+    if (!filteredAsset) return allSymbolBlocks;
+    return allSymbolBlocks.filter((b) => b.realizedByAsset[filteredAsset!]);
+  }, [allSymbolBlocks, filteredAsset]);
 
   function runParse(tsv: string) {
     setError("");
@@ -782,21 +721,64 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
+  /* ---------- totals used by Full text & health chips ---------- */
+  const eventsOrderByAsset = useMemo(
+    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER)),
+    [events]
+  );
+  const eventsPayoutByAsset = useMemo(
+    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT)),
+    [events]
+  );
+  const eventsNetByAsset = useMemo(() => {
+    const m: Record<string, { net: number }> = {};
+    const assets = new Set([
+      ...Object.keys(eventsOrderByAsset),
+      ...Object.keys(eventsPayoutByAsset),
+    ]);
+    assets.forEach((a) => {
+      const o = eventsOrderByAsset[a]?.net ?? 0;
+      const p = eventsPayoutByAsset[a]?.net ?? 0;
+      m[a] = { net: o + p };
+    });
+    return m;
+  }, [eventsOrderByAsset, eventsPayoutByAsset]);
+
+  const totalByAsset = useMemo(() => {
+    // mirror buildFullResponse accumulation (without zero-suppression)
+    const totals: Record<string, number> = {};
+    const bump = (map: Record<string, { net: number }>) => {
+      Object.entries(map).forEach(([a, v]) => (totals[a] = (totals[a] ?? 0) + (v?.net ?? 0)));
+    };
+    bump(realizedByAsset);
+    bump(commissionByAsset);
+    bump(referralByAsset);
+    bump(fundingByAsset);
+    bump(insuranceByAsset);
+    bump(coinSwapAggByAsset);
+    bump(autoExAggByAsset);
+    bump(eventsOrderByAsset);
+    bump(eventsPayoutByAsset);
+    bump(transfersByAsset);
+    bump(gridbotByAsset);
+    return totals;
+  }, [
+    realizedByAsset,
+    commissionByAsset,
+    referralByAsset,
+    fundingByAsset,
+    insuranceByAsset,
+    coinSwapAggByAsset,
+    autoExAggByAsset,
+    eventsOrderByAsset,
+    eventsPayoutByAsset,
+    transfersByAsset,
+    gridbotByAsset,
+  ]);
+
+  /* ---------- Full Response builder ---------- */
   function buildFullResponse(): string {
     if (!rows.length) return "No data.";
-
-    const collect = (pred: (r: Row) => boolean) => sumByAsset(rows.filter(pred));
-
-    const realizedAgg = collect((r) => r.type === TYPE.REALIZED_PNL);
-    const commAgg = collect((r) => r.type === TYPE.COMMISSION);
-    const refkickAgg = collect((r) => r.type === TYPE.REFERRAL_KICKBACK);
-    const fundAgg = collect((r) => r.type === TYPE.FUNDING_FEE);
-    const insAgg = collect((r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE);
-    const transferAgg = collect((r) => r.type === TYPE.TRANSFER);
-    const gridbotAgg = collect((r) => r.type === TYPE.GRIDBOT_TRANSFER);
-
-    const evOrder = sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER));
-    const evPay = sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT));
 
     const otherByType: Record<string, { [asset: string]: { pos: number; neg: number; net: number } }> = {};
     otherTypesNonEvent.forEach((r) => {
@@ -807,36 +789,19 @@ export default function App() {
     });
 
     const assets = new Set<string>([
-      ...Object.keys(realizedAgg),
-      ...Object.keys(commAgg),
-      ...Object.keys(refkickAgg),
-      ...Object.keys(fundAgg),
-      ...Object.keys(insAgg),
+      ...Object.keys(realizedByAsset),
+      ...Object.keys(commissionByAsset),
+      ...Object.keys(referralByAsset),
+      ...Object.keys(fundingByAsset),
+      ...Object.keys(insuranceByAsset),
       ...Object.keys(coinSwapAggByAsset),
       ...Object.keys(autoExAggByAsset),
-      ...Object.keys(evOrder),
-      ...Object.keys(evPay),
-      ...Object.keys(transferAgg),
-      ...Object.keys(gridbotAgg),
+      ...Object.keys(eventsOrderByAsset),
+      ...Object.keys(eventsPayoutByAsset),
+      ...Object.keys(transfersByAsset),
+      ...Object.keys(gridbotByAsset),
       ...Object.values(otherByType).flatMap((m) => Object.keys(m)),
     ]);
-
-    const total: Record<string, number> = {};
-    const bump = (a: string, v: number) => (total[a] = (total[a] ?? 0) + v);
-    for (const [a, v] of Object.entries(realizedAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(commAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(refkickAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(fundAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(insAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(coinSwapAggByAsset)) bump(a, v.net);
-    for (const [a, v] of Object.entries(autoExAggByAsset)) bump(a, v.net);
-    for (const [a, v] of Object.entries(evOrder)) bump(a, v.net);
-    for (const [a, v] of Object.entries(evPay)) bump(a, v.net);
-    for (const [a, v] of Object.entries(transferAgg)) bump(a, v.net);
-    for (const [a, v] of Object.entries(gridbotAgg)) bump(a, v.net);
-    for (const type of Object.keys(otherByType)) {
-      for (const [a, v] of Object.entries(otherByType[type])) bump(a, v.net);
-    }
 
     const L: string[] = [];
     L.push("Summary of your balance log (UTC+0):", "");
@@ -848,17 +813,17 @@ export default function App() {
     Array.from(assets)
       .sort()
       .forEach((asset) => {
-        const r = realizedAgg[asset];
-        const c = commAgg[asset];
-        const rk = refkickAgg[asset];
-        const f = fundAgg[asset];
-        const i = insAgg[asset];
+        const r = realizedByAsset[asset];
+        const c = commissionByAsset[asset];
+        const rk = referralByAsset[asset];
+        const f = fundingByAsset[asset];
+        const i = insuranceByAsset[asset];
         const cs = coinSwapAggByAsset[asset];
         const ae = autoExAggByAsset[asset];
-        const eo = evOrder[asset];
-        const ep = evPay[asset];
-        const tr = transferAgg[asset];
-        const gb = gridbotAgg[asset];
+        const eo = eventsOrderByAsset[asset];
+        const ep = eventsPayoutByAsset[asset];
+        const tr = transfersByAsset[asset];
+        const gb = gridbotByAsset[asset];
 
         L.push(`Asset: ${asset}`);
 
@@ -915,7 +880,7 @@ export default function App() {
         }
         if (otherLines.length) L.push(...otherLines);
 
-        const net = total[asset] ?? 0;
+        const net = totalByAsset[asset] ?? 0;
         if (abs(net) > EPS) {
           L.push(`  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
         }
@@ -941,10 +906,8 @@ export default function App() {
   }
 
   function copyEvents() {
-    const orders = events.filter((r) => r.type === TYPE.EVENT_ORDER);
-    const payouts = events.filter((r) => r.type === TYPE.EVENT_PAYOUT);
-    const byOrder = sumByAsset(orders);
-    const byPayout = sumByAsset(payouts);
+    const byOrder = eventsOrderByAsset;
+    const byPayout = eventsPayoutByAsset;
     const assets = Array.from(new Set([...Object.keys(byOrder), ...Object.keys(byPayout)])).sort();
 
     const L: string[] = ["Event Contracts (UTC+0)", ""];
@@ -1004,9 +967,9 @@ export default function App() {
 
   // Copy all symbols as readable text
   function copyAllSymbolsText() {
-    if (!symbolBlocks.length) return copyText("No symbol activity.");
+    if (!allSymbolBlocks.length) return copyText("No symbol activity.");
     const L: string[] = ["By Symbol (Futures, not Events)", ""];
-    symbolBlocks.forEach((b) => {
+    allSymbolBlocks.forEach((b) => {
       const lines: string[] = [];
       const add = (name: string, m: Record<string, { pos: number; neg: number }>) => {
         const txt = pairsToText(m);
@@ -1025,13 +988,10 @@ export default function App() {
     copyText(L.join("\n").trim());
   }
 
-  // Save PNG of full symbols table (canvas)
   function saveSymbolsPng() {
     if (!symbolBlocks.length) return;
     drawSymbolsCanvas(symbolBlocks, "symbols_table.png");
   }
-
-  // Save PNG of one row (canvas)
   function saveOneSymbolPng(b: SymbolBlock) {
     drawSingleRowCanvas(b);
   }
@@ -1073,28 +1033,116 @@ export default function App() {
     alert("Self-test passed ✅");
   }
 
-  /* ---------- KPI header (sticky) ---------- */
-  const kpi = useMemo(() => {
-    const sum = (m: Record<string, { pos: number; neg: number; net: number }>) =>
-      Object.values(m).reduce(
-        (a, v) => ({ pos: a.pos + v.pos, neg: a.neg + v.neg, net: a.net + v.net }),
-        { pos: 0, neg: 0, net: 0 }
-      );
+  /* ---------- KPIs & Health Checks ---------- */
+  // Per-symbol net (realized + funding + commission + insurance)
+  const symbolNetStats = useMemo(() => {
+    const stats: { symbol: string; net: number; byAsset: Record<string, number> }[] = [];
+    allSymbolBlocks.forEach((b) => {
+      const addMap = (m: Record<string, { pos: number; neg: number }>, sign = 1) => {
+        Object.entries(m).forEach(([asset, v]) => {
+          const n = (v.pos - v.neg) * sign;
+          statsObj.byAsset[asset] = (statsObj.byAsset[asset] ?? 0) + n;
+          statsObj.net += n;
+        });
+      };
+      const statsObj = { symbol: b.symbol, net: 0, byAsset: {} as Record<string, number> };
+      addMap(b.realizedByAsset, +1);
+      addMap(b.fundingByAsset, +1);
+      addMap(b.commByAsset, +1); // commission map already has pos refunds / neg fees — same sign
+      addMap(b.insByAsset, +1);
+      stats.push(statsObj);
+    });
+    stats.sort((a, b) => b.net - a.net);
+    return stats;
+  }, [allSymbolBlocks]);
+
+  const topWinner = symbolNetStats[0];
+  const topLoser = symbolNetStats.slice().reverse()[0];
+
+  const kpis = useMemo(() => {
     return {
-      realized: sum(realizedByAsset),
-      fees: sum(commissionByAsset),
-      funding: sum(fundingByAsset),
-      transfers: sum(transfersByAsset),
-      gridbot: sum(gridbotByAsset),
-      eventsNet: (() => {
-        const orders = events.filter((r) => r.type === TYPE.EVENT_ORDER);
-        const payouts = events.filter((r) => r.type === TYPE.EVENT_PAYOUT);
-        const so = Object.values(sumByAsset(orders)).reduce((n, v) => n + v.net, 0);
-        const sp = Object.values(sumByAsset(payouts)).reduce((n, v) => n + v.net, 0);
-        return so + sp;
-      })(),
+      tradesParsed: nonEvent.length,
+      activeSymbols: allSymbolBlocks.length,
+      topWinner,
+      topLoser,
     };
-  }, [realizedByAsset, commissionByAsset, fundingByAsset, transfersByAsset, gridbotByAsset, events]);
+  }, [nonEvent.length, allSymbolBlocks.length, topWinner, topLoser]);
+
+  // Health checks per-asset
+  const HEALTH = { FEE_RATIO: 0.35, FUNDING_DOM: 1.0, TRANSFER_IMPACT: 0.5, EVENTS_IMPACT: 0.25 };
+  const healthChips = useMemo(() => {
+    const chips: Array<{ key: string; text: string; action: () => void }> = [];
+    const assets = new Set([
+      ...Object.keys(realizedByAsset),
+      ...Object.keys(commissionByAsset),
+      ...Object.keys(fundingByAsset),
+      ...Object.keys(transfersByAsset),
+      ...Object.keys(eventsNetByAsset),
+    ]);
+    const jump = (selector: string) => () => {
+      const el = document.querySelector(selector) as HTMLElement | null;
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    let anyCore = allSymbolBlocks.length > 0;
+
+    assets.forEach((asset) => {
+      const r = realizedByAsset[asset]?.net ?? 0;
+      const c = commissionByAsset[asset]?.net ?? 0;
+      const f = fundingByAsset[asset]?.net ?? 0;
+      const tr = transfersByAsset[asset]?.net ?? 0;
+      const ev = eventsNetByAsset[asset]?.net ?? 0;
+      const total = totalByAsset[asset] ?? 0;
+      const absR = abs(r);
+
+      if (absR >= 10 * EPS && abs(c) / absR > HEALTH.FEE_RATIO) {
+        chips.push({ key: `fee-${asset}`, text: `⚠️ High fees vs PnL in ${asset}`, action: jump("h3:contains('Trading Fees')") });
+      }
+      if (abs(f) > absR) {
+        chips.push({ key: `fund-${asset}`, text: `ℹ️ Funding > PnL in ${asset}`, action: jump("h3:contains('Funding Fees')") });
+      }
+      if (abs(tr) > HEALTH.TRANSFER_IMPACT * abs(total)) {
+        chips.push({ key: `tr-${asset}`, text: `↔ Transfers drive net in ${asset}`, action: jump("h3:contains('Transfers')") });
+      }
+      if (abs(ev) > HEALTH.EVENTS_IMPACT * abs(total)) {
+        chips.push({
+          key: `ev-${asset}`,
+          text: `🎯 Events materially affect ${asset}`,
+          action: () => setActiveTab("events"),
+        });
+      }
+    });
+
+    if (!anyCore && rows.length > 0) {
+      chips.push({ key: "no-core", text: "🧪 Only rebates/other types — no core trading", action: jump("h3:contains('Other Types')") });
+    }
+
+    if (!chips.length) {
+      chips.push({ key: "ok", text: "✅ Looks good", action: () => {} });
+    }
+    return chips;
+  }, [
+    realizedByAsset,
+    commissionByAsset,
+    fundingByAsset,
+    transfersByAsset,
+    eventsNetByAsset,
+    totalByAsset,
+    allSymbolBlocks.length,
+    rows.length,
+  ]);
+
+  // helper for scrolling to a symbol row
+  function focusSymbolRow(symbol?: string) {
+    if (!symbol) return;
+    setTimeout(() => {
+      const el = document.getElementById(`row-${symbol}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.animate([{ backgroundColor: "#fff2" }, { backgroundColor: "transparent" }], { duration: 1600 });
+    }, 60);
+  }
 
   return (
     <div className="wrap">
@@ -1181,178 +1229,173 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          {/* Sticky KPI header */}
-          <div className="kpi sticky card">
-            <div className="kpi-row">
-              <div className="kpi-block">
-                <div className="kpi-title">Realized PnL</div>
-                <div className={`kpi-num ${kpi.realized.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.realized.net)}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">Commission</div>
-                <div className={`kpi-num ${kpi.fees.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.fees.net)}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">Funding</div>
-                <div className={`kpi-num ${kpi.funding.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.funding.net)}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">Transfers (Gen)</div>
-                <div className={`kpi-num ${kpi.transfers.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.transfers.net)}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">GridBot</div>
-                <div className={`kpi-num ${kpi.gridbot.net >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.gridbot.net)}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">Events Net</div>
-                <div className={`kpi-num ${kpi.eventsNet >= 0 ? "good" : "bad"}`}>{fmtSigned(kpi.eventsNet)}</div>
-              </div>
 
+          {/* === Sticky 3-row header === */}
+          <div className="kpi sticky card" aria-label="Summary header">
+            {/* Row 1 — Per-asset realized PnL (USDT/USDC/BNFCR only) */}
+            <div className="kpi-row tiles">
+              {["USDT", "USDC", "BNFCR"].map((a) => {
+                const v = realizedByAsset[a];
+                if (!v) return null;
+                const active = filteredAsset === a;
+                return (
+                  <button
+                    key={a}
+                    className={`tile ${active ? "active" : ""}`}
+                    onClick={() => setFilteredAsset(active ? null : a)}
+                    aria-pressed={active}
+                    title={`Filter By Symbol to ${a}`}
+                  >
+                    <div className="tile-head">{a}</div>
+                    <div className={`tile-big ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</div>
+                    <div className="tile-sub">
+                      <span className="good">+{fmtAbs(v.pos)}</span> / <span className="bad">−{fmtAbs(v.neg)}</span>
+                    </div>
+                  </button>
+                );
+              })}
               <div className="kpi-actions btn-row">
                 <button className="btn btn-success" onClick={copySummary}>Copy Summary (no Swaps)</button>
                 <button className="btn" onClick={copyFullResponse}>Copy Response (Full)</button>
                 <button className="btn" onClick={openFullPreview}>Preview/Edit Full Response</button>
               </div>
             </div>
+
+            {/* Row 2 — KPIs */}
+            <div className="kpi-row kpigrid">
+              <div className="kpi-block">
+                <div className="kpi-title">Trades parsed</div>
+                <div className="kpi-num">{kpis.tradesParsed}</div>
+              </div>
+              <div className="kpi-block">
+                <div className="kpi-title">Active symbols</div>
+                <div className="kpi-num">{kpis.activeSymbols}</div>
+              </div>
+              <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topWinner?.symbol)} disabled={!kpis.topWinner}>
+                <div className="kpi-title">Top winner (symbol)</div>
+                <div className="kpi-num">{kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}</div>
+              </button>
+              <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topLoser?.symbol)} disabled={!kpis.topLoser}>
+                <div className="kpi-title">Top loser (symbol)</div>
+                <div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
+              </button>
+            </div>
+
+            {/* Row 3 — Health checks */}
+            <div className="kpi-row chips">
+              {healthChips.map((c) => (
+                <button key={c.key} className="chip" onClick={c.action}>{c.text}</button>
+              ))}
+            </div>
+          </div>
+          {/* === End sticky header === */}
+
+          {/* Main cards grid */}
+          <div className="grid three">
+            <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+            <RpnCard title="Referral Kickback" map={referralByAsset} />
+            <RpnCard title="Funding Fees" map={fundingByAsset} />
+            <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+
+            {/* Transfers grouped */}
+            <div className="card">
+              <div className="card-head">
+                <h3>Transfers</h3>
+              </div>
+              <div className="stack">
+                <div className="typecard">
+                  <div className="card-head"><h4>General</h4></div>
+                  <ul className="kv">
+                    {Object.keys(transfersByAsset).length ? (
+                      Object.entries(transfersByAsset).map(([asset, v]) => (
+                        <li key={asset} className="kv-row">
+                          <span className="label">{asset}</span>
+                          <span className="num good">+{fmtAbs(v.pos)}</span>
+                          <span className="num bad">−{fmtAbs(v.neg)}</span>
+                          <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                        </li>
+                      ))
+                    ) : (
+                      <li className="kv-row"><span className="muted">None</span></li>
+                    )}
+                  </ul>
+                </div>
+
+                <div className="typecard">
+                  <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
+                  <ul className="kv">
+                    {Object.keys(gridbotByAsset).length ? (
+                      Object.entries(gridbotByAsset).map(([asset, v]) => (
+                        <li key={asset} className="kv-row">
+                          <span className="label">{asset}</span>
+                          <span className="num good">+{fmtAbs(v.pos)}</span>
+                          <span className="num bad">−{fmtAbs(v.neg)}</span>
+                          <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                        </li>
+                      ))
+                    ) : (
+                      <li className="kv-row"><span className="muted">None</span></li>
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            {/* Other Types (friendly) */}
+            {otherTypesNonEvent.length > 0 && (
+              <div className="card">
+                <div className="card-head"><h3>Other Types (non-event)</h3></div>
+                <OtherTypesBlock rows={otherTypesNonEvent} />
+              </div>
+            )}
           </div>
 
-          {/* Dual Pane: left summary / right By Symbol */}
-          <DualPane
-            storageKey="dualpane_summary_ratio"
-            left={
-              <div className="pane-inner">
-                {/* Realized PnL tiles */}
-                <div className="card">
-                  <div className="card-head">
-                    <h3>Realized PnL (Futures, not Events)</h3>
-                  </div>
-                  {Object.keys(realizedByAsset).length ? (
-                    <ul className="grid two">
-                      {Object.entries(realizedByAsset).map(([asset, v]) => (
-                        <li key={asset} className="pill">
-                          <span className="label">{asset}</span>{" "}
-                          <span className="good">+{fmtAbs(v.pos)}</span> •{" "}
-                          <span className="bad">−{fmtAbs(v.neg)}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="muted">No Realized PnL found.</p>
-                  )}
-                </div>
-
-                {/* Main cards grid */}
-                <div className="grid three">
-                  <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-                  <RpnCard title="Referral Kickback" map={referralByAsset} />
-                  <RpnCard title="Funding Fees" map={fundingByAsset} />
-                  <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-
-                  {/* Transfers grouped */}
-                  <div className="card">
-                    <div className="card-head">
-                      <h3>Transfers</h3>
-                    </div>
-                    <div className="stack">
-                      <div className="typecard">
-                        <div className="card-head"><h4>General</h4></div>
-                        <ul className="kv">
-                          {Object.keys(transfersByAsset).length ? (
-                            Object.entries(transfersByAsset).map(([asset, v]) => (
-                              <li key={asset} className="kv-row">
-                                <span className="label">{asset}</span>
-                                <span className="num good">+{fmtAbs(v.pos)}</span>
-                                <span className="num bad">−{fmtAbs(v.neg)}</span>
-                                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                              </li>
-                            ))
-                          ) : (
-                            <li className="kv-row"><span className="muted">None</span></li>
-                          )}
-                        </ul>
-                      </div>
-
-                      <div className="typecard">
-                        <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
-                        <ul className="kv">
-                          {Object.keys(gridbotByAsset).length ? (
-                            Object.entries(gridbotByAsset).map(([asset, v]) => (
-                              <li key={asset} className="kv-row">
-                                <span className="label">{asset}</span>
-                                <span className="num good">+{fmtAbs(v.pos)}</span>
-                                <span className="num bad">−{fmtAbs(v.neg)}</span>
-                                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                              </li>
-                            ))
-                          ) : (
-                            <li className="kv-row"><span className="muted">None</span></li>
-                          )}
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Other Types (friendly) */}
-                  {otherTypesNonEvent.length > 0 && (
-                    <div className="card">
-                      <div className="card-head"><h3>Other Types (non-event)</h3></div>
-                      <OtherTypesBlock rows={otherTypesNonEvent} />
-                    </div>
-                  )}
-                </div>
+          {/* By Symbol */}
+          <div className="subcard">
+            <div className="card-head" style={{ padding: 0, marginBottom: 8 }}>
+              <h3>By Symbol (Futures, not Events){filteredAsset ? ` — filtered: ${filteredAsset}` : ""}</h3>
+              <div className="btn-row">
+                <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
+                <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
               </div>
-            }
-            right={
-              <div className="pane-inner">
-                <div className="card">
-                  <div className="card-head">
-                    <h3>By Symbol (Futures, not Events)</h3>
-                    <div className="btn-row">
-                      <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
-                      <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
-                    </div>
-                  </div>
+            </div>
 
-                  {symbolBlocks.length ? (
-                    <div className="tablewrap">
-                      <table className="table">
-                        <thead>
-                          <tr>
-                            <th>Symbol</th>
-                            <th>Realized PnL</th>
-                            <th>Funding</th>
-                            <th>Trading Fees</th>
-                            <th>Insurance</th>
-                            <th className="actions sticky-right">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {symbolBlocks.map((b) => (
-                            <tr key={b.symbol} id={`row-${b.symbol}`}>
-                              <td className="label">{b.symbol}</td>
-                              <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
-                              <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
-                              <td className="num">{renderAssetPairs(b.commByAsset)}</td>
-                              <td className="num">{renderAssetPairs(b.insByAsset)}</td>
-                              <td className="actions sticky-right">
-                                <div className="btn-row">
-                                  <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                                  <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="muted">No symbol activity.</p>
-                  )}
-                </div>
+            {symbolBlocks.length ? (
+              <div className="tablewrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Realized PnL</th>
+                      <th>Funding</th>
+                      <th>Trading Fees</th>
+                      <th>Insurance</th>
+                      <th className="actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {symbolBlocks.map((b) => (
+                      <tr key={b.symbol} id={`row-${b.symbol}`}>
+                        <td className="label">{b.symbol}</td>
+                        <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
+                        <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
+                        <td className="num">{renderAssetPairs(b.commByAsset)}</td>
+                        <td className="num">{renderAssetPairs(b.insByAsset)}</td>
+                        <td className="actions">
+                          <div className="btn-row">
+                            <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
+                            <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            }
-          />
+            ) : (
+              <p className="muted">No symbol activity.</p>
+            )}
+          </div>
         </section>
       )}
 
@@ -1598,19 +1641,15 @@ const css = `
 
 /* Sections & Cards */
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
-.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden;min-width:0}
+.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
-.grid{display:grid;gap:12px;align-items:start;min-width:0}
-.grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.grid{display:grid;gap:12px;align-items:start}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
-.pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}
 .kv{display:grid;gap:8px}
-.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}
+.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
 .label{font-weight:600}
-.num{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-
-/* Paste + diagnostics */
+.num{font-variant-numeric:tabular-nums}
 .paste{width:100%;height:120px;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;background:#fff}
 .error{color:#b91c1c;margin:8px 0 0}
 .diags summary{cursor:pointer;font-weight:600}
@@ -1632,9 +1671,30 @@ const css = `
 .list{margin:0;padding:0 0 0 18px}
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
+
+/* Sticky KPI header (3 rows) */
+.kpi.sticky{position:sticky; top:8px; z-index:5}
+.kpi-row{display:grid; gap:10px; align-items:center}
+.kpi-row.tiles{grid-template-columns:repeat(3,minmax(160px,1fr)) auto}
+.kpi-row.kpigrid{grid-template-columns:repeat(4,minmax(160px,1fr))}
+.kpi-row.chips{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.kpi-actions{justify-self:end}
+.tile{display:flex; flex-direction:column; align-items:flex-start; text-align:left; background:#fbfcfe; border:1px solid var(--line); border-radius:12px; padding:10px 12px; cursor:pointer}
+.tile:hover{background:#f6f8ff}
+.tile.active{box-shadow:0 0 0 2px var(--primary) inset; background:#f3f6ff}
+.tile-head{font-size:12px; color:var(--muted); font-weight:700; margin-bottom:2px}
+.tile-big{font-weight:800; font-size:18px; line-height:1.2}
+.tile-sub{font-size:12px; color:var(--muted)}
+.kpi-block{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.kpi-title{font-size:12px;color:var(--muted);margin-bottom:4px}
+.kpi-num{font-weight:800}
+.kpi-block.as-btn{cursor:pointer; text-align:left}
+.kpi-block.as-btn:disabled{opacity:.5; cursor:not-allowed}
+.chip{border:1px solid var(--line); background:#fff; padding:8px 10px; border-radius:999px; text-align:left; cursor:pointer}
+.chip:hover{background:#f9fafb}
+
 .pair{display:inline-block;margin-right:2px}
 .actions{min-width:200px}
-.sticky-right{position:sticky; right:0; background:#fff; box-shadow: -12px 0 10px -10px rgba(0,0,0,.06); z-index:2}
 
 /* Dropzone */
 .dropzone{
@@ -1650,24 +1710,12 @@ const css = `
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
 
-/* KPI header */
-.kpi.sticky{position:sticky; top:8px; z-index:5}
-.kpi-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) auto; gap:10px; align-items:center}
-.kpi-block{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0}
-.kpi-title{font-size:12px;color:var(--muted);margin-bottom:4px}
-.kpi-num{font-weight:700}
-
-/* Dual Pane */
-.dual{display:flex; gap:0; border:1px solid var(--line); border-radius:16px; overflow:hidden; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.pane{min-width:0; max-width:100%; display:flex; flex-direction:column}
-.pane-inner{padding:12px}
-.splitter{width:10px; cursor:col-resize; background:linear-gradient(90deg,#f5f7fb,#e9edf5); border-left:1px solid var(--line); border-right:1px solid var(--line)}
-@media (max-width: 980px){
-  .kpi-row{grid-template-columns:repeat(3,minmax(0,1fr)) auto}
+/* Responsive */
+@media (max-width: 900px){
+  .kpi-row.tiles{grid-template-columns:repeat(2,minmax(160px,1fr)) auto}
+  .kpi-row.kpigrid{grid-template-columns:repeat(2,minmax(160px,1fr))}
 }
-@media (max-width: 720px){
-  .kpi-row{grid-template-columns:repeat(2,minmax(0,1fr)) auto}
-  .dual{flex-direction:column}
-  .splitter{height:10px;width:auto;cursor:row-resize}
+@media (max-width: 640px){
+  .kpi-row.tiles{grid-template-columns:repeat(1,minmax(160px,1fr)) auto}
 }
 `;
