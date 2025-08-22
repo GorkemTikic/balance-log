@@ -4,10 +4,10 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
- * Fix in this revision:
- *  - Grid declares THREE columns (left | splitter | right), so the right pane no longer drops below.
- *  - Splitter width is a single source of truth (SPLIT_W) used by both CSS and inline grid template.
- *  - Build fix: React inline style now uses camelCase (justifyContent) everywhere.
+ * This revision adds:
+ *  - Sticky right "Actions" column with compact icon buttons (📝/🖼️)
+ *  - Body cell wrapping (header remains nowrap) to fit all metric columns more often
+ *  - Raised minimum right pane width to ~420px for better default usability
  */
 
 type Row = {
@@ -151,7 +151,7 @@ function parseBalanceLog(text: string) {
 
     const amount = Number(amountRaw);
     if (Number.isNaN(amount)) {
-      diags.push(`• Skipped (amount not numeric): ${line.slice(0, 160)}`);
+      diags.push(`• Skopped (amount not numeric): ${line.slice(0, 160)}`);
       continue;
     }
 
@@ -601,10 +601,11 @@ export default function App() {
     function onMove(e: MouseEvent) {
       if (!dragging || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left; // pointer X from left edge
+      const x = e.clientX - rect.left;
       const cw = rect.width;
-      const newRightPct = ((cw - x) / cw) * 100; // splitter has its own grid track
-      const clamped = Math.min(60, Math.max((360 / cw) * 100, newRightPct));
+      const newRightPct = ((cw - x) / cw) * 100;
+      const minPct = (420 / cw) * 100; // raised min width (~420px)
+      const clamped = Math.min(60, Math.max(minPct, newRightPct));
       setRightPct(clamped);
     }
     function onUp() {
@@ -1164,7 +1165,7 @@ export default function App() {
                         <th>Funding</th>
                         <th>Trading Fees</th>
                         <th>Insurance</th>
-                        <th className="actions">Actions</th>
+                        <th className="actcol">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1175,10 +1176,10 @@ export default function App() {
                           <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
                           <td className="num">{renderAssetPairs(b.commByAsset)}</td>
                           <td className="num">{renderAssetPairs(b.insByAsset)}</td>
-                          <td className="actions">
+                          <td className="actcol">
                             <div className="btn-row">
-                              <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                              <button className="btn btn-small" onClick={() => drawSingleRowCanvas(b)}>Save PNG</button>
+                              <button className="btn btn-ico" aria-label="Copy details" title="Copy details" onClick={() => copyOneSymbol(b)}>📝</button>
+                              <button className="btn btn-ico" aria-label="Save PNG" title="Save PNG" onClick={() => drawSingleRowCanvas(b)}>🖼️</button>
                             </div>
                           </td>
                         </tr>
@@ -1393,6 +1394,7 @@ const css = `
 .btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
 .btn-small{padding:6px 10px}
+.btn-ico{padding:6px 8px;font-size:16px;line-height:1;border-radius:8px}
 
 /* Sections & Cards */
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
@@ -1418,8 +1420,8 @@ const css = `
 /* Tables */
 .tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
 .table{width:100%;border-collapse:separate;border-spacing:0}
-.table th,.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
-.table thead th{background:#fbfcfe;font-weight:700;position:sticky;top:0;z-index:1}
+.table th{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap;background:#fbfcfe;position:sticky;top:0;z-index:1}
+.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:normal;word-break:break-word}
 .table .label{font-weight:600}
 .table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .table.small td,.table.small th{padding:8px 10px}
@@ -1428,7 +1430,10 @@ const css = `
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
 .pair{display:inline-block;margin-right:2px}
-.actions{min-width:200px}
+
+/* Sticky right "Actions" column */
+.actcol{position:sticky;right:0;background:#fff;box-shadow:-1px 0 0 var(--line);z-index:2;min-width:120px}
+.table thead .actcol{z-index:4}
 
 /* Sticky KPI header (2 rows) */
 .kpi.sticky{position:sticky; top:8px; z-index:5}
