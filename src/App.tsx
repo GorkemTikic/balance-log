@@ -3,10 +3,10 @@ import React, { useMemo, useRef, useState } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * - Summary cards (with Other Types in the summary area)
- * - By Symbol with per-row Copy / Save PNG and one-click Save All PNG
- * - Coin Swaps split: Auto-Exchange vs Coin Swaps
- * - Full Response preview/edit includes Transfers, GridBot Transfers, and Other Types
+ * - Summary cards in a clean responsive grid (no overlap)
+ * - By Symbol with per-row Copy + Save PNG and a single "Save Symbols PNG" (tall image)
+ * - Auto-Exchange and Coin Swaps are handled and reported separately
+ * - Full Response preview/edit includes Transfers, GridBot Transfers, and Other Types (friendly names)
  * - Zero-suppression EPS = 1e-12, all times UTC+0
  */
 
@@ -87,6 +87,25 @@ function toCsv<T extends object>(rows: T[]) {
 }
 const sumMapMagnitude = (m: Record<string, { pos: number; neg: number }>) =>
   Object.values(m).reduce((acc, v) => acc + abs(v.pos) + abs(v.neg), 0);
+
+function titleCaseWords(s: string) {
+  if (!s) return s;
+  return s
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+function friendlyTypeName(t: string) {
+  // special cases, else: title-case the snake name
+  const map: Record<string, string> = {
+    CASH_COUPON: "Cash Coupon",
+    WELCOME_BONUS: "Welcome Bonus",
+    BFUSD_REWARD: "BFUSD Reward",
+    STRATEGY_UMFUTURES_TRANSFER: "Futures GridBot Transfer",
+  };
+  return map[t] || titleCaseWords(t);
+}
 
 /* ---------- parsing ---------- */
 function splitColumns(line: string) {
@@ -199,7 +218,7 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const commByAsset = sumByAsset(comm);
     const insByAsset = sumByAsset(ins);
 
-    // FILTER OUT: if there is no Realized PnL, no Commission, and no Funding (across all assets)
+    // FILTER OUT: require core activity (PnL or Commission or Funding)
     const coreMagnitude =
       sumMapMagnitude(realizedByAsset) +
       sumMapMagnitude(fundingByAsset) +
@@ -413,7 +432,7 @@ function RpnCard({
   );
 }
 
-function renderAssetPairs(map: Record<string, { pos: number; neg: number; net: number }>) {
+function renderAssetPairs(map: Record<string, { pos: number; neg: number }>) {
   const entries = Object.entries(map);
   if (!entries.length) return <span>–</span>;
   return (
@@ -436,87 +455,124 @@ function pairsToText(map: Record<string, { pos: number; neg: number }>) {
   return entries.map(([a, v]) => `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`).join("; ");
 }
 
-/* ---------- PNG helpers (no external deps) ---------- */
-function stripStickyStyles(el: HTMLElement) {
-  el.querySelectorAll<HTMLElement>(".sticky").forEach((n) => {
-    n.style.position = "relative";
-    n.style.right = "auto";
-    n.style.left = "auto";
-    n.style.boxShadow = "none";
-    n.classList.remove("sticky");
+/* ---------- PNG canvas renderer (no external deps) ---------- */
+type SymbolBlock = ReturnType<typeof bySymbolSummary>[number];
+
+function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
+  if (!blocks.length) return;
+
+  // Layout constants
+  const dpr = Math.max(1, Math.min(2, (window.devicePixelRatio || 1)));
+  const padX = 16;
+  const rowH = 36;
+  const headH = 44;
+  const colSymbol = 160;
+  const cols = [
+    { key: "Realized PnL", width: 260 },
+    { key: "Funding", width: 220 },
+    { key: "Trading Fees", width: 220 },
+    { key: "Insurance", width: 220 },
+  ];
+  const width =
+    padX * 2 + colSymbol + cols.reduce((s, c) => s + c.width, 0);
+
+  const height = headH + rowH * blocks.length + padX;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(width * dpr);
+  canvas.height = Math.ceil(height * dpr);
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(dpr, dpr);
+
+  // Styles
+  const bg = "#ffffff";
+  const line = "#e6e9ee";
+  const txt = "#0f1720";
+  const good = "#059669";
+  const bad = "#dc2626";
+  const headBg = "#fbfcfe";
+
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.strokeStyle = line;
+  ctx.fillStyle = headBg;
+  ctx.fillRect(0, 0, width, headH);
+  ctx.fillStyle = txt;
+  ctx.font = "600 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+  ctx.fillText("By Symbol (Futures, not Events)", padX, 26);
+
+  // header row
+  let x = padX + colSymbol;
+  ctx.font = "600 12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+  cols.forEach((c) => {
+    ctx.fillText(c.key, x + 6, 42);
+    x += c.width;
   });
+
+  // grid lines
+  ctx.beginPath();
+  ctx.moveTo(0, headH + 0.5);
+  ctx.lineTo(width, headH + 0.5);
+  ctx.stroke();
+
+  // rows
+  blocks.forEach((b, i) => {
+    const y = headH + i * rowH;
+    // row line
+    ctx.beginPath();
+    ctx.moveTo(0, y + rowH + 0.5);
+    ctx.lineTo(width, y + rowH + 0.5);
+    ctx.stroke();
+
+    // symbol
+    ctx.font = "600 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+    ctx.fillStyle = txt;
+    ctx.fillText(b.symbol, padX, y + 24);
+
+    // values
+    const cellTxt = (m: Record<string, { pos: number; neg: number }>) => {
+      const parts: string[] = [];
+      Object.entries(m).forEach(([asset, v]) => {
+        const pos = v.pos > EPS ? `+${fmtAbs(v.pos)} ${asset}` : "";
+        const neg = v.neg > EPS ? `−${fmtAbs(v.neg)} ${asset}` : "";
+        if (pos) parts.push(pos);
+        if (neg) parts.push(neg);
+      });
+      return parts.join(", ");
+    };
+
+    let cx = padX + colSymbol;
+    const values = [
+      cellTxt(b.realizedByAsset),
+      cellTxt(b.fundingByAsset),
+      cellTxt(b.commByAsset),
+      cellTxt(b.insByAsset),
+    ];
+
+    values.forEach((val, idx) => {
+      // split to color good/bad tokens
+      const tokens = val.split(/( [+,−][0-9.]+ [A-Z0-9]+)(?=,|$)/g).filter(Boolean);
+      let tx = cx + 6;
+      ctx.font = "12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+      tokens.length ? tokens.forEach((t) => {
+        const isGood = /^\s*\+/.test(t);
+        const isBad = /^\s*−/.test(t);
+        ctx.fillStyle = isGood ? good : isBad ? bad : txt;
+        ctx.fillText(t.trim(), tx, y + 24);
+        tx += ctx.measureText(t.trim()).width + 4;
+      }) : (ctx.fillStyle = "#6b7280", ctx.fillText("–", tx, y + 24));
+      cx += cols[idx].width;
+    });
+  });
+
+  const link = document.createElement("a");
+  link.download = downloadName;
+  link.href = canvas.toDataURL("image/png");
+  link.click();
 }
 
-async function elementToPng(el: HTMLElement, filename: string) {
-  // Clone to off-screen sandbox
-  const width = Math.ceil(el.scrollWidth);
-  const height = Math.ceil(el.scrollHeight);
-
-  const sandbox = document.createElement("div");
-  sandbox.style.position = "fixed";
-  sandbox.style.left = "-99999px";
-  sandbox.style.top = "0";
-  sandbox.style.width = width + "px";
-  sandbox.style.height = height + "px";
-  sandbox.style.background = "#fff";
-  const clone = el.cloneNode(true) as HTMLElement;
-  stripStickyStyles(clone);
-  clone.style.width = width + "px";
-  clone.style.height = "auto";
-  (clone.style as any).overflow = "visible";
-  sandbox.appendChild(clone);
-  document.body.appendChild(sandbox);
-
-  // foreignObject → img → canvas
-  const svgNS = "http://www.w3.org/2000/svg";
-  const xhtmlNS = "http://www.w3.org/1999/xhtml";
-
-  const wrapper = document.createElement("div");
-  wrapper.setAttribute("xmlns", xhtmlNS);
-  wrapper.style.width = width + "px";
-  wrapper.style.height = height + "px";
-  wrapper.appendChild(clone);
-
-  const foreign = document.createElementNS(svgNS, "foreignObject");
-  foreign.setAttribute("x", "0");
-  foreign.setAttribute("y", "0");
-  foreign.setAttribute("width", String(width));
-  foreign.setAttribute("height", String(height));
-  foreign.appendChild(wrapper);
-
-  const svg = document.createElementNS(svgNS, "svg");
-  svg.setAttribute("xmlns", svgNS);
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.appendChild(foreign);
-
-  const data = new XMLSerializer().serializeToString(svg);
-  const blob = new Blob([data], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-
-  const img = new Image();
-  await new Promise((res) => {
-    img.onload = () => res(null);
-    img.src = url;
-  });
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(img, 0, 0);
-  URL.revokeObjectURL(url);
-
-  const pngUrl = canvas.toDataURL("image/png");
-  const a = document.createElement("a");
-  a.href = pngUrl;
-  a.download = filename;
-  a.click();
-
-  document.body.removeChild(sandbox);
+function drawSingleRowCanvas(block: SymbolBlock) {
+  drawSymbolsCanvas([block], `${block.symbol}.png`);
 }
 
 /* ---------- main app ---------- */
@@ -578,10 +634,6 @@ export default function App() {
 
   // Symbol table blocks (filtered: no-only-referral symbols)
   const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
-
-  // Refs for PNG export
-  const tableRef = useRef<HTMLTableElement | null>(null);
-  const tableWrapRef = useRef<HTMLDivElement | null>(null);
 
   function runParse(tsv: string) {
     setError("");
@@ -648,7 +700,7 @@ export default function App() {
         .sort()
         .forEach((t) => {
           const m = sumByAsset(byType[t]);
-          L.push(`  ${t}:`);
+          L.push(`  ${friendlyTypeName(t)}:`);
           Object.entries(m).forEach(([asset, v]) => {
             L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
             L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
@@ -781,7 +833,7 @@ export default function App() {
           );
         }
 
-        // Other types by asset for this asset
+        // Other types by asset (friendly names) for this asset
         const otherLines: string[] = [];
         for (const [t, m] of Object.entries(otherByType)) {
           const v = m[asset];
@@ -789,12 +841,9 @@ export default function App() {
           const parts: string[] = [];
           if (v.pos > EPS) parts.push(`+${fmtAbs(v.pos)}`);
           if (v.neg > EPS) parts.push(`−${fmtAbs(v.neg)}`);
-          if (parts.length) otherLines.push(`    ${t}: ${parts.join(" / ")} ${asset}`);
+          if (parts.length) otherLines.push(`  ${friendlyTypeName(t)}: ${parts.join(" / ")} ${asset}`);
         }
-        if (otherLines.length) {
-          L.push("  Other Types (non-event):");
-          L.push(...otherLines);
-        }
+        if (otherLines.length) L.push(...otherLines);
 
         const net = total[asset] ?? 0;
         if (abs(net) > EPS) {
@@ -848,7 +897,7 @@ export default function App() {
         .sort()
         .forEach((t) => {
           const m = sumByAsset(byType[t]);
-          L.push(`  ${t}:`);
+          L.push(`  ${friendlyTypeName(t)}:`);
           Object.entries(m).forEach(([asset, v]) => {
             L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
             L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
@@ -868,8 +917,8 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  // Copy one symbol block
-  function copyOneSymbol(b: ReturnType<typeof bySymbolSummary>[number]) {
+  // Copy one symbol block (text)
+  function copyOneSymbol(b: SymbolBlock) {
     const L: string[] = [];
     L.push(`${b.symbol} (UTC+0)`);
     const push = (name: string, m: Record<string, { pos: number; neg: number }>) => {
@@ -906,18 +955,15 @@ export default function App() {
     copyText(L.join("\n").trim());
   }
 
-  // Save PNG of full symbols table
-  async function saveSymbolsPng() {
-    const wrap = tableWrapRef.current;
-    if (!wrap) return;
-    await elementToPng(wrap, "symbols_table.png");
+  // Save PNG of full symbols table (canvas)
+  function saveSymbolsPng() {
+    if (!symbolBlocks.length) return;
+    drawSymbolsCanvas(symbolBlocks, "symbols_table.png");
   }
 
-  // Save PNG of one row
-  async function saveOneSymbolPng(symbol: string) {
-    const row = document.getElementById(`row-${symbol}`);
-    if (!row) return;
-    await elementToPng(row as HTMLElement, `${symbol}.png`);
+  // Save PNG of one row (canvas)
+  function saveOneSymbolPng(b: SymbolBlock) {
+    drawSingleRowCanvas(b);
   }
 
   function downloadCsvFile(filename: string, data: Row[]) {
@@ -1127,7 +1173,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Other Types moved UP here (inside cards area) */}
+              {/* Other Types (friendly) */}
               {otherTypesNonEvent.length > 0 && (
                 <div className="card">
                   <div className="card-head"><h3>Other Types (non-event)</h3></div>
@@ -1147,8 +1193,8 @@ export default function App() {
               </div>
 
               {symbolBlocks.length ? (
-                <div className="tablewrap" ref={tableWrapRef} id="symbols-wrap">
-                  <table className="table" ref={tableRef}>
+                <div className="tablewrap">
+                  <table className="table">
                     <thead>
                       <tr>
                         <th>Symbol</th>
@@ -1156,7 +1202,7 @@ export default function App() {
                         <th>Funding</th>
                         <th>Trading Fees</th>
                         <th>Insurance</th>
-                        <th className="sticky actions">Actions</th>
+                        <th className="actions">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1167,10 +1213,10 @@ export default function App() {
                           <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
                           <td className="num">{renderAssetPairs(b.commByAsset)}</td>
                           <td className="num">{renderAssetPairs(b.insByAsset)}</td>
-                          <td className="sticky actions">
+                          <td className="actions">
                             <div className="btn-row">
                               <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                              <button className="btn btn-small" onClick={() => saveOneSymbolPng(b.symbol)}>Save PNG</button>
+                              <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
                             </div>
                           </td>
                         </tr>
@@ -1377,7 +1423,7 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
         return (
           <div key={t} className="typecard">
             <div className="card-head">
-              <h4>{t}</h4>
+              <h4>{friendlyTypeName(t)}</h4>
             </div>
             {ks.length ? (
               <ul className="kv">
@@ -1410,7 +1456,7 @@ const css = `
   --primary:#0f62fe; --dark:#0f172a; --success:#10b981; --danger:#ef4444; --pill:#f7f8fa;
 }
 *{box-sizing:border-box} body{margin:0}
-.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
 .header{max-width:1200px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
 .header h1{margin:0 0 2px;font-size:26px}
 .muted{color:var(--muted)}
@@ -1424,12 +1470,12 @@ const css = `
 .btn-success{background:var(--success);border-color:var(--success);color:#fff}
 .btn-small{padding:6px 10px}
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto}
+.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto;overflow:hidden}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
-.grid{display:grid;gap:12px}
-.grid.two{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-.grid.three{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.grid{display:grid;gap:12px;align-items:start}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
 .pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px}
 .kv{display:grid;gap:8px}
 .kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
@@ -1453,8 +1499,7 @@ const css = `
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
 .pair{display:inline-block;margin-right:2px}
-.actions{min-width:180px}
-.sticky.actions{position:sticky; right:0; background:#fff; z-index:2; box-shadow:-1px 0 0 0 var(--line)}
+.actions{min-width:200px}
 .dropzone{
   width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
   padding:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);
