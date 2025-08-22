@@ -1,16 +1,15 @@
 // src/App.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * Update:
- * - Fix blank screen after Parse (removed stray label; restored missing helpers)
- * - Header = 2 rows (no health row)
- * - Row1: Per-asset Realized PnL pills (USDT/USDC/BNFCR): +received • −paid
- * - Row2: KPIs (Trades parsed, Active symbols, Top winner/loser) + actions (wrap on small screens)
- * - By Symbol: filter dropdown moved to the RIGHT of the header (with copy/export buttons)
- * - Anti-overlap CSS: auto-fit grids and wrapping toolbars
- * - Business logic unchanged: UTC+0, EPS=1e-12, swaps separated, events separate
+ * Summary tab now uses a dual-pane layout:
+ *  - LEFT: analysis cards
+ *  - RIGHT: By Symbol table (resizable, sticky; width persisted)
+ * Fixes:
+ *  - KPI "Trades parsed" counts ALL rows (events included)
+ *  - EPS zero-suppression in UI for tiles & By Symbol cells
+ *  - Top winner/loser set symbol filter and scroll the right pane
  */
 
 type Row = {
@@ -67,6 +66,8 @@ const EPS = 1e-12;
 
 /* ---------- utils ---------- */
 const abs = (x: number) => Math.abs(Number(x) || 0);
+const gt = (x: number) => abs(x) > EPS;
+
 function fmtAbs(x: number, maxDp = 8) {
   const v = abs(x);
   const s = v.toFixed(maxDp);
@@ -220,7 +221,7 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const commByAsset = sumByAsset(comm);
     const insByAsset = sumByAsset(ins);
 
-    // FILTER OUT: require core activity (PnL or Commission or Funding)
+    // symbol must have core activity to show
     const coreMagnitude =
       sumMapMagnitude(realizedByAsset) +
       sumMapMagnitude(fundingByAsset) +
@@ -417,12 +418,20 @@ function RpnCard({
         <ul className="kv">
           {keys.map((asset) => {
             const v = map[asset];
+            const chunks: React.ReactNode[] = [];
+            if (gt(v.pos)) chunks.push(<span key="p" className="num good">+{fmtAbs(v.pos)}</span>);
+            if (gt(v.neg)) chunks.push(<span key="n" className="num bad">−{fmtAbs(v.neg)}</span>);
+            const netEl = gt(v.net) ? (
+              <span key="net" className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+            ) : (
+              <span key="dash" className="num muted">–</span>
+            );
             return (
               <li key={asset} className="kv-row">
                 <span className="label">{asset}</span>
-                <span className="num good">+{fmtAbs(v.pos)}</span>
-                <span className="num bad">−{fmtAbs(v.neg)}</span>
-                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                {chunks.length ? chunks : <span className="num muted">–</span>}
+                {chunks.length > 1 ? null : <span className="num muted"></span>}
+                {netEl}
               </li>
             );
           })}
@@ -436,24 +445,34 @@ function RpnCard({
 
 function renderAssetPairs(map: Record<string, { pos: number; neg: number }>) {
   const entries = Object.entries(map);
-  if (!entries.length) return <span>–</span>;
+  const filtered = entries
+    .map<[string, { pos: number; neg: number }]>(([asset, v]) => [asset, v])
+    .filter(([, v]) => gt(v.pos) || gt(v.neg));
+  if (!filtered.length) return <span>–</span>;
   return (
     <>
-      {entries.map(([asset, v], i) => (
+      {filtered.map(([asset, v], i) => (
         <span key={asset} className="pair">
-          <span className="good">+{fmtAbs(v.pos)}</span>
-          {" / "}
-          <span className="bad">−{fmtAbs(v.neg)}</span>
-          {" "}{asset}{i < entries.length - 1 ? ", " : ""}
+          {gt(v.pos) && <span className="good">+{fmtAbs(v.pos)}</span>}
+          {gt(v.pos) && gt(v.neg) && " / "}
+          {gt(v.neg) && <span className="bad">−{fmtAbs(v.neg)}</span>}{" "}
+          {asset}
+          {i < filtered.length - 1 ? ", " : ""}
         </span>
       ))}
     </>
   );
 }
 function pairsToText(map: Record<string, { pos: number; neg: number }>) {
-  const entries = Object.entries(map);
+  const entries = Object.entries(map).filter(([, v]) => gt(v.pos) || gt(v.neg));
   if (!entries.length) return "–";
-  return entries.map(([a, v]) => `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`).join("; ");
+  return entries
+    .map(([a, v]) => {
+      if (gt(v.pos) && gt(v.neg)) return `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`;
+      if (gt(v.pos)) return `+${fmtAbs(v.pos)} ${a}`;
+      return `−${fmtAbs(v.neg)} ${a}`;
+    })
+    .join("; ");
 }
 
 /* ---------- PNG canvas renderer ---------- */
@@ -585,8 +604,42 @@ export default function App() {
   const [showFullPreview, setShowFullPreview] = useState(false);
   const [fullPreviewText, setFullPreviewText] = useState("");
 
-  // Symbol filter (dropdown in By Symbol header, on the RIGHT)
+  // Symbol filter (RIGHT pane)
   const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
+
+  // Right pane width (% of container)
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const rightRef = useRef<HTMLDivElement | null>(null);
+  const [rightPct, setRightPct] = useState<number>(() => {
+    const v = localStorage.getItem("paneRightPct");
+    const n = v ? Number(v) : 45;
+    return isFinite(n) ? Math.min(60, Math.max(36, n)) : 45;
+  });
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragging || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left; // left width
+      const cw = rect.width;
+      const newRightPct = ((cw - x) / cw) * 100;
+      const clamped = Math.min(60, Math.max((360 / cw) * 100, newRightPct));
+      setRightPct(clamped);
+    }
+    function onUp() {
+      if (dragging) {
+        setDragging(false);
+        localStorage.setItem("paneRightPct", String(Math.round(rightPct)));
+      }
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging, rightPct]);
 
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
@@ -692,9 +745,9 @@ export default function App() {
       L.push(title + ":");
       keys.forEach((asset) => {
         const v = map[asset];
-        L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
-        L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
-        if (typeof v.net === "number") L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
+        if (gt(v.pos)) L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
+        if (gt(v.neg)) L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
+        if (typeof v.net === "number" && gt(v.net)) L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
       });
       L.push("");
     };
@@ -716,9 +769,9 @@ export default function App() {
           const m = sumByAsset(byType[t]);
           L.push(`  ${friendlyTypeName(t)}:`);
           Object.entries(m).forEach(([asset, v]) => {
-            L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
-            L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
-            L.push(`    Net ${asset}: ${fmtSigned(v.net)}`);
+            if (gt(v.pos)) L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
+            if (gt(v.neg)) L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
+            if (gt(v.net)) L.push(`    Net ${asset}: ${fmtSigned(v.net)}`);
           });
         });
     }
@@ -808,40 +861,40 @@ export default function App() {
         L.push(`Asset: ${asset}`);
 
         if (r) {
-          pushIf(r.pos > EPS, `  Profit in ${asset}: +${fmtAbs(r.pos)}`);
-          pushIf(r.neg > EPS, `  Loss in ${asset}: −${fmtAbs(r.neg)}`);
+          pushIf(gt(r.pos), `  Profit in ${asset}: +${fmtAbs(r.pos)}`);
+          pushIf(gt(r.neg), `  Loss in ${asset}: −${fmtAbs(r.neg)}`);
         }
         if (c) {
-          pushIf(c.neg > EPS, `  Trading Fee in ${asset}: −${fmtAbs(c.neg)}`);
-          pushIf(c.pos > EPS, `  Trading Fee refunds in ${asset}: +${fmtAbs(c.pos)}`);
+          pushIf(gt(c.neg), `  Trading Fee in ${asset}: −${fmtAbs(c.neg)}`);
+          pushIf(gt(c.pos), `  Trading Fee refunds in ${asset}: +${fmtAbs(c.pos)}`);
         }
         if (rk) {
-          pushIf(rk.pos > EPS, `  Fee Rebate in ${asset}: +${fmtAbs(rk.pos)}`);
-          pushIf(rk.neg > EPS, `  Fee Rebate adjustments in ${asset}: −${fmtAbs(rk.neg)}`);
+          pushIf(gt(rk.pos), `  Fee Rebate in ${asset}: +${fmtAbs(rk.pos)}`);
+          pushIf(gt(rk.neg), `  Fee Rebate adjustments in ${asset}: −${fmtAbs(rk.neg)}`);
         }
         if (f) {
-          pushIf(f.pos > EPS, `  Funding Fee Received in ${asset}: +${fmtAbs(f.pos)}`);
-          pushIf(f.neg > EPS, `  Funding Fee Paid in ${asset}: −${fmtAbs(f.neg)}`);
+          pushIf(gt(f.pos), `  Funding Fee Received in ${asset}: +${fmtAbs(f.pos)}`);
+          pushIf(gt(f.neg), `  Funding Fee Paid in ${asset}: −${fmtAbs(f.neg)}`);
         }
         if (i) {
-          pushIf(i.pos > EPS, `  Liquidation Clearance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
-          pushIf(i.neg > EPS, `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
+          pushIf(gt(i.pos), `  Liquidation Clearance Fee Received in ${asset}: +${fmtAbs(i.pos)}`);
+          pushIf(gt(i.neg), `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
         }
         if (cs) {
-          pushIf(cs.pos > EPS, `  Coin Swaps Received ${asset}: +${fmtAbs(cs.pos)}`);
-          pushIf(cs.neg > EPS, `  Coin Swaps Used ${asset}: −${fmtAbs(cs.neg)}`);
+          pushIf(gt(cs.pos), `  Coin Swaps Received ${asset}: +${fmtAbs(cs.pos)}`);
+          pushIf(gt(cs.neg), `  Coin Swaps Used ${asset}: −${fmtAbs(cs.neg)}`);
         }
         if (ae) {
-          pushIf(ae.pos > EPS, `  Auto-Exchange Received ${asset}: +${fmtAbs(ae.pos)}`);
-          pushIf(ae.neg > EPS, `  Auto-Exchange Used ${asset}: −${fmtAbs(ae.neg)}`);
+          pushIf(gt(ae.pos), `  Auto-Exchange Received ${asset}: +${fmtAbs(ae.pos)}`);
+          pushIf(gt(ae.neg), `  Auto-Exchange Used ${asset}: −${fmtAbs(ae.neg)}`);
         }
-        if (ep) pushIf(ep.pos > EPS, `  Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
-        if (eo) pushIf(eo.neg > EPS, `  Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
+        if (ep) pushIf(gt(ep.pos), `  Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
+        if (eo) pushIf(gt(eo.neg), `  Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
 
-        if (tr && (tr.pos > EPS || tr.neg > EPS)) {
+        if (tr && (gt(tr.pos) || gt(tr.neg))) {
           pushIf(true, `  Transfers (General) — Received ${asset}: +${fmtAbs(tr.pos)} / Paid ${asset}: −${fmtAbs(tr.neg)}`);
         }
-        if (gb && (gb.pos > EPS || gb.neg > EPS)) {
+        if (gb && (gt(gb.pos) || gt(gb.neg))) {
           pushIf(
             true,
             `  Total Transfer To/From the Futures GridBot Wallet — ${asset}: −${fmtAbs(gb.neg)} / +${fmtAbs(gb.pos)}`
@@ -854,16 +907,14 @@ export default function App() {
           const v = m[asset];
           if (!v) continue;
           const parts: string[] = [];
-          if (v.pos > EPS) parts.push(`+${fmtAbs(v.pos)}`);
-          if (v.neg > EPS) parts.push(`−${fmtAbs(v.neg)}`);
+          if (gt(v.pos)) parts.push(`+${fmtAbs(v.pos)}`);
+          if (gt(v.neg)) parts.push(`−${fmtAbs(v.neg)}`);
           if (parts.length) otherLines.push(`  ${friendlyTypeName(t)}: ${parts.join(" / ")} ${asset}`);
         }
         if (otherLines.length) L.push(...otherLines);
 
         const net = totalByAsset[asset] ?? 0;
-        if (abs(net) > EPS) {
-          L.push(`  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
-        }
+        if (gt(net)) L.push(`  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
         L.push("");
       });
 
@@ -984,7 +1035,7 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  // KPIs
+  /* ---------- KPIs ---------- */
   const symbolNetStats = useMemo(() => {
     const stats: { symbol: string; net: number }[] = [];
     allSymbolBlocks.forEach((b) => {
@@ -1007,12 +1058,23 @@ export default function App() {
 
   const kpis = useMemo(() => {
     return {
-      tradesParsed: nonEvent.length,
+      tradesParsed: rows.length, // FIX: all rows, not only non-events
       activeSymbols: allSymbolBlocks.length,
       topWinner,
       topLoser,
     };
-  }, [nonEvent.length, allSymbolBlocks.length, topWinner, topLoser]);
+  }, [rows.length, allSymbolBlocks.length, topWinner, topLoser]);
+
+  // Scroll helper within right pane
+  function focusSymbolRow(symbol?: string) {
+    if (!symbol) return;
+    setTimeout(() => {
+      const el = document.getElementById(`row-${symbol}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.animate([{ backgroundColor: "#fff2" }, { backgroundColor: "transparent" }], { duration: 1200 });
+    }, 60);
+  }
 
   return (
     <div className="wrap">
@@ -1099,25 +1161,28 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          {/* === 2-row sticky header === */}
+          {/* === header (2 rows) === */}
           <div className="kpi sticky card" aria-label="Summary header">
-            {/* Row 1 — Per-asset realized PnL pills (no net) */}
+            {/* Row 1 — Per-asset realized PnL tiles */}
             <div className="kpi-row tiles">
               {["USDT", "USDC", "BNFCR"].map((a) => {
                 const v = realizedByAsset[a];
                 if (!v) return null;
+                const chunks: React.ReactNode[] = [];
+                if (gt(v.pos)) chunks.push(<span key="p" className="good">+{fmtAbs(v.pos)}</span>);
+                if (gt(v.neg)) chunks.push(<span key="n" className="bad">−{fmtAbs(v.neg)}</span>);
                 return (
                   <div key={a} className="tile" title={`Realized PnL in ${a}`}>
                     <div className="tile-head">{a}</div>
                     <div className="tile-sub">
-                      <span className="good">+{fmtAbs(v.pos)}</span> • <span className="bad">−{fmtAbs(v.neg)}</span>
+                      {chunks.length ? chunks.reduce((acc, el, i) => (i ? [...acc, " • ", el] : [el]), [] as any) : "–"}
                     </div>
                   </div>
                 );
               })}
             </div>
 
-            {/* Row 2 — KPIs + actions (wrap) */}
+            {/* Row 2 — KPIs + actions */}
             <div className="kpi-row topbar">
               <div className="kpigrid">
                 <div className="kpi-block">
@@ -1128,23 +1193,33 @@ export default function App() {
                   <div className="kpi-title">Active symbols</div>
                   <div className="kpi-num">{kpis.activeSymbols}</div>
                 </div>
-                <button className="kpi-block as-btn" onClick={() => {
-                  if (kpis.topWinner) {
-                    const el = document.getElementById(`row-${kpis.topWinner.symbol}`);
-                    el?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  }
-                }} disabled={!kpis.topWinner}>
+                <button
+                  className="kpi-block as-btn"
+                  onClick={() => {
+                    if (!kpis.topWinner) return;
+                    setSymbolFilter(kpis.topWinner.symbol);
+                    focusSymbolRow(kpis.topWinner.symbol);
+                  }}
+                  disabled={!kpis.topWinner}
+                >
                   <div className="kpi-title">Top winner</div>
-                  <div className="kpi-num">{kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}</div>
+                  <div className="kpi-num">
+                    {kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}
+                  </div>
                 </button>
-                <button className="kpi-block as-btn" onClick={() => {
-                  if (kpis.topLoser) {
-                    const el = document.getElementById(`row-${kpis.topLoser.symbol}`);
-                    el?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  }
-                }} disabled={!kpis.topLoser}>
+                <button
+                  className="kpi-block as-btn"
+                  onClick={() => {
+                    if (!kpis.topLoser) return;
+                    setSymbolFilter(kpis.topLoser.symbol);
+                    focusSymbolRow(kpis.topLoser.symbol);
+                  }}
+                  disabled={!kpis.topLoser}
+                >
                   <div className="kpi-title">Top loser</div>
-                  <div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
+                  <div className="kpi-num">
+                    {kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}
+                  </div>
                 </button>
               </div>
 
@@ -1157,128 +1232,146 @@ export default function App() {
           </div>
           {/* === /header === */}
 
-          {/* Main cards grid */}
-          <div className="grid three">
-            <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-            <RpnCard title="Referral Kickback" map={referralByAsset} />
-            <RpnCard title="Funding Fees" map={fundingByAsset} />
-            <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+          {/* === Dual-pane: LEFT cards | RIGHT By Symbol === */}
+          <div
+            className="dual"
+            ref={containerRef}
+            style={{ gridTemplateColumns: `minmax(0, 1fr) ${Math.round(rightPct)}%` }}
+          >
+            {/* LEFT: analysis cards */}
+            <div className="left">
+              <div className="grid three">
+                <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+                <RpnCard title="Referral Kickback" map={referralByAsset} />
+                <RpnCard title="Funding Fees" map={fundingByAsset} />
+                <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
 
-            {/* Transfers grouped */}
-            <div className="card">
-              <div className="card-head">
-                <h3>Transfers</h3>
-              </div>
-              <div className="stack">
-                <div className="typecard">
-                  <div className="card-head"><h4>General</h4></div>
-                  <ul className="kv">
-                    {Object.keys(transfersByAsset).length ? (
-                      Object.entries(transfersByAsset).map(([asset, v]) => (
-                        <li key={asset} className="kv-row">
-                          <span className="label">{asset}</span>
-                          <span className="num good">+{fmtAbs(v.pos)}</span>
-                          <span className="num bad">−{fmtAbs(v.neg)}</span>
-                          <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                        </li>
-                      ))
-                    ) : (
-                      <li className="kv-row"><span className="muted">None</span></li>
-                    )}
-                  </ul>
+                {/* Transfers grouped */}
+                <div className="card">
+                  <div className="card-head">
+                    <h3>Transfers</h3>
+                  </div>
+                  <div className="stack">
+                    <div className="typecard">
+                      <div className="card-head"><h4>General</h4></div>
+                      <ul className="kv">
+                        {Object.keys(transfersByAsset).length ? (
+                          Object.entries(transfersByAsset).map(([asset, v]) => (
+                            <li key={asset} className="kv-row">
+                              <span className="label">{asset}</span>
+                              {gt(v.pos) ? <span className="num good">+{fmtAbs(v.pos)}</span> : <span className="num muted">–</span>}
+                              {gt(v.neg) ? <span className="num bad">−{fmtAbs(v.neg)}</span> : <span className="num muted">–</span>}
+                              {gt(v.net)
+                                ? <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                                : <span className="num muted">–</span>}
+                            </li>
+                          ))
+                        ) : (
+                          <li className="kv-row"><span className="muted">None</span></li>
+                        )}
+                      </ul>
+                    </div>
+
+                    <div className="typecard">
+                      <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
+                      <ul className="kv">
+                        {Object.keys(gridbotByAsset).length ? (
+                          Object.entries(gridbotByAsset).map(([asset, v]) => (
+                            <li key={asset} className="kv-row">
+                              <span className="label">{asset}</span>
+                              {gt(v.pos) ? <span className="num good">+{fmtAbs(v.pos)}</span> : <span className="num muted">–</span>}
+                              {gt(v.neg) ? <span className="num bad">−{fmtAbs(v.neg)}</span> : <span className="num muted">–</span>}
+                              {gt(v.net)
+                                ? <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                                : <span className="num muted">–</span>}
+                            </li>
+                          ))
+                        ) : (
+                          <li className="kv-row"><span className="muted">None</span></li>
+                        )}
+                      </ul>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="typecard">
-                  <div className="card-head"><h4>Futures GridBot Wallet</h4></div>
-                  <ul className="kv">
-                    {Object.keys(gridbotByAsset).length ? (
-                      Object.entries(gridbotByAsset).map(([asset, v]) => (
-                        <li key={asset} className="kv-row">
-                          <span className="label">{asset}</span>
-                          <span className="num good">+{fmtAbs(v.pos)}</span>
-                          <span className="num bad">−{fmtAbs(v.neg)}</span>
-                          <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-                        </li>
-                      ))
-                    ) : (
-                      <li className="kv-row"><span className="muted">None</span></li>
-                    )}
-                  </ul>
-                </div>
+                {/* Other Types (friendly) */}
+                {otherTypesNonEvent.length > 0 && (
+                  <div className="card">
+                    <div className="card-head"><h3>Other Types (non-event)</h3></div>
+                    <OtherTypesBlock rows={otherTypesNonEvent} />
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Other Types (friendly) */}
-            {otherTypesNonEvent.length > 0 && (
-              <div className="card">
-                <div className="card-head"><h3>Other Types (non-event)</h3></div>
-                <OtherTypesBlock rows={otherTypesNonEvent} />
-              </div>
-            )}
-          </div>
+            {/* SPLITTER */}
+            <div
+              className={`splitter ${dragging ? "drag" : ""}`}
+              onMouseDown={() => setDragging(true)}
+              title="Drag to resize"
+            />
 
-          {/* By Symbol */}
-          <div className="subcard">
-            <div className="card-head" style={{ padding: 0, marginBottom: 8, gap: 12 }}>
-              <h3>By Symbol (Futures, not Events)</h3>
-              <div className="btn-row">
-                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span>Filter:</span>
-                  <select
-                    className="select"
-                    value={symbolFilter}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setSymbolFilter(val);
-                    }}
-                  >
-                    <option value="ALL">All symbols</option>
-                    {allSymbolBlocks.map((b) => (
-                      <option key={b.symbol} value={b.symbol}>{b.symbol}</option>
-                    ))}
-                  </select>
-                </label>
-                <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
-                <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
+            {/* RIGHT: By Symbol (sticky, own scroll) */}
+            <div className="right card" ref={rightRef}>
+              <div className="card-head" style={{ gap: 12 }}>
+                <h3>By Symbol (Futures, not Events)</h3>
+                <div className="btn-row">
+                  <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>Filter:</span>
+                    <select
+                      className="select"
+                      value={symbolFilter}
+                      onChange={(e) => setSymbolFilter(e.target.value)}
+                    >
+                      <option value="ALL">All symbols</option>
+                      {allSymbolBlocks.map((b) => (
+                        <option key={b.symbol} value={b.symbol}>{b.symbol}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
+                  <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
+                </div>
               </div>
-            </div>
 
-            {symbolBlocks.length ? (
-              <div className="tablewrap">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Symbol</th>
-                      <th>Realized PnL</th>
-                      <th>Funding</th>
-                      <th>Trading Fees</th>
-                      <th>Insurance</th>
-                      <th className="actions">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {symbolBlocks.map((b) => (
-                      <tr key={b.symbol} id={`row-${b.symbol}`}>
-                        <td className="label">{b.symbol}</td>
-                        <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
-                        <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
-                        <td className="num">{renderAssetPairs(b.commByAsset)}</td>
-                        <td className="num">{renderAssetPairs(b.insByAsset)}</td>
-                        <td className="actions">
-                          <div className="btn-row">
-                            <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                            <button className="btn btn-small" onClick={() => drawSingleRowCanvas(b)}>Save PNG</button>
-                          </div>
-                        </td>
+              {symbolBlocks.length ? (
+                <div className="tablewrap right-scroll">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Symbol</th>
+                        <th>Realized PnL</th>
+                        <th>Funding</th>
+                        <th>Trading Fees</th>
+                        <th>Insurance</th>
+                        <th className="actions">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="muted">No symbol activity.</p>
-            )}
+                    </thead>
+                    <tbody>
+                      {symbolBlocks.map((b) => (
+                        <tr key={b.symbol} id={`row-${b.symbol}`}>
+                          <td className="label">{b.symbol}</td>
+                          <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.commByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.insByAsset)}</td>
+                          <td className="actions">
+                            <div className="btn-row">
+                              <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
+                              <button className="btn btn-small" onClick={() => drawSingleRowCanvas(b)}>Save PNG</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="muted">No symbol activity.</p>
+              )}
+            </div>
           </div>
+          {/* === /Dual-pane === */}
         </section>
       )}
 
@@ -1482,9 +1575,11 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
                   return (
                     <li key={asset} className="kv-row">
                       <span className="label">{asset}</span>
-                      <span className="num good">+{fmtAbs(v.pos)}</span>
-                      <span className="num bad">−{fmtAbs(v.neg)}</span>
-                      <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                      {gt(v.pos) ? <span className="num good">+{fmtAbs(v.pos)}</span> : <span className="num muted">–</span>}
+                      {gt(v.neg) ? <span className="num bad">−{fmtAbs(v.neg)}</span> : <span className="num muted">–</span>}
+                      {gt(v.net)
+                        ? <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+                        : <span className="num muted">–</span>}
                     </li>
                   );
                 })}
@@ -1552,7 +1647,6 @@ const css = `
 .table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .table.small td,.table.small th{padding:8px 10px}
 .select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff}
-.leftbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .list{margin:0;padding:0 0 0 18px}
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
@@ -1566,9 +1660,19 @@ const css = `
 .kpi-row.topbar{grid-template-columns:1fr auto; align-items:start}
 .kpigrid{display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .kpi-actions{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end}
-.tile{display:flex; flex-direction:column; align-items:flex-start; text-align:left; background:#fbfcfe; border:1px solid var(--line); border-radius:12px; padding:10px 12px}
-.tile-head{font-size:12px; color:var(--muted); font-weight:700; margin-bottom:2px}
-.tile-sub{font-size:13px}
+.kpi-block{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:180px}
+.kpi-block.as-btn{cursor:pointer}
+.kpi-block.as-btn:hover{background:#f3f6ff;border-color:#d9e2ff}
+.kpi-title{font-size:12px;color:var(--muted);font-weight:700;margin-bottom:2px}
+.kpi-num{font-weight:800}
+
+/* Dual-pane layout */
+.dual{display:grid;gap:10px;grid-template-columns:1fr 45%;align-items:start;margin-top:8px}
+.left{min-width:0}
+.right{min-width:0;position:sticky;top:96px;max-height:calc(100vh - 120px);display:flex;flex-direction:column}
+.right-scroll{max-height:calc(100vh - 180px)}
+.splitter{width:8px;cursor:col-resize;border-left:1px solid var(--line);border-right:1px solid var(--line);background:linear-gradient(to bottom,#f7f9fc,#eef2f9)}
+.splitter.drag{background:linear-gradient(to bottom,#e5f0ff,#d8e6ff)}
 
 /* Dropzone */
 .dropzone{
@@ -1583,4 +1687,12 @@ const css = `
 .modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
+
+/* Responsive stacking */
+@media (max-width: 980px){
+  .dual{grid-template-columns:1fr; }
+  .splitter{display:none}
+  .right{position:relative;top:auto;max-height:none}
+  .right-scroll{max-height:none}
+}
 `;
