@@ -3,14 +3,13 @@ import React, { useMemo, useRef, useState, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
- * NEW:
- * - 3-row sticky header in Summary tab:
- *   Row1: Per-asset Realized PnL tiles (USDT/USDC/BNFCR) — no cross-asset mixing
- *   Row2: KPIs (Trades parsed, Active symbols, Top winner/loser)
- *   Row3: Health Check chips (clickable insights)
- * - Row1 tiles act as a filter on the "By Symbol" table (toggle)
- * - Winner/loser chips scroll to their table row
- * - All guardrails preserved: UTC+0, EPS=1e-12, transfers counted, swaps vs auto-exchange separate, events separate
+ * Update:
+ * - Header simplified to 2 rows (no health row)
+ *   Row1: Per-asset Realized PnL pills (USDT/USDC/BNFCR): +received • −paid (no net, no cross-asset combining)
+ *   Row2: KPIs (Trades parsed, Active symbols, Top winner/loser) + actions (wrap on small screens)
+ * - By Symbol: symbol filter dropdown on the left (filters table and jumps to row)
+ * - Anti-overlap CSS: auto-fit grids and wrapping toolbar
+ * - Business logic unchanged: UTC+0, EPS=1e-12, swaps separated, events separate
  */
 
 type Row = {
@@ -141,6 +140,8 @@ function parseBalanceLog(text: string) {
     }
 
     const id = cols[0] ?? "";
+    theRow: {
+    }
     const uid = cols[1] ?? "";
     const asset = cols[2] ?? "";
     const type = cols[3] ?? "";
@@ -450,14 +451,13 @@ function renderAssetPairs(map: Record<string, { pos: number; neg: number }>) {
     </>
   );
 }
-
 function pairsToText(map: Record<string, { pos: number; neg: number }>) {
   const entries = Object.entries(map);
   if (!entries.length) return "–";
   return entries.map(([a, v]) => `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`).join("; ");
 }
 
-/* ---------- PNG canvas renderer (no external deps) ---------- */
+/* ---------- PNG canvas renderer ---------- */
 type SymbolBlock = ReturnType<typeof bySymbolSummary>[number];
 
 function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
@@ -531,7 +531,6 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
     ctx.fillStyle = txt;
     ctx.fillText(b.symbol, padX, y + 24);
 
-    // values
     const cellTxt = (m: Record<string, { pos: number; neg: number }>) => {
       const parts: string[] = [];
       Object.entries(m).forEach(([asset, v]) => {
@@ -552,7 +551,6 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
     ];
 
     values.forEach((val, idx) => {
-      // split to color good/bad tokens
       const tokens = val.split(/( [+,−][0-9.]+ [A-Z0-9]+)(?=,|$)/g).filter(Boolean);
       let tx = cx + 6;
       ctx.font = "12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
@@ -572,7 +570,6 @@ function drawSymbolsCanvas(blocks: SymbolBlock[], downloadName: string) {
   link.href = canvas.toDataURL("image/png");
   link.click();
 }
-
 function drawSingleRowCanvas(block: SymbolBlock) {
   drawSymbolsCanvas([block], `${block.symbol}.png`);
 }
@@ -584,11 +581,13 @@ export default function App() {
   const [diags, setDiags] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
-  const [filteredAsset, setFilteredAsset] = useState<string | null>(null); // Row1 filter
 
   // Full response preview/edit
   const [showFullPreview, setShowFullPreview] = useState(false);
   const [fullPreviewText, setFullPreviewText] = useState("");
+
+  // Symbol filter (dropdown in By Symbol)
+  const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
 
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
@@ -605,11 +604,9 @@ export default function App() {
   const transfers = useMemo(() => parsed.filter((r) => r.type === TYPE.TRANSFER), [parsed]);
   const gridbotTransfers = useMemo(() => parsed.filter((r) => r.type === TYPE.GRIDBOT_TRANSFER), [parsed]);
 
-  // swaps split
   const coinSwapLines = useMemo(() => groupSwaps(parsed, "COIN_SWAP"), [parsed]);
   const autoExLines = useMemo(() => groupSwaps(parsed, "AUTO_EXCHANGE"), [parsed]);
 
-  // Other types (non-event, excluding known)
   const otherTypesNonEvent = useMemo(
     () => parsed.filter((r) => !KNOWN_TYPES.has(r.type) && !r.type.startsWith(EVENT_PREFIX)),
     [parsed]
@@ -625,7 +622,16 @@ export default function App() {
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
   const gridbotByAsset = useMemo(() => sumByAsset(gridbotTransfers), [gridbotTransfers]);
 
-  // swaps aggregated by asset (for Full text / health checks)
+  // For Full & KPIs
+  const eventsOrderByAsset = useMemo(
+    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER)),
+    [events]
+  );
+  const eventsPayoutByAsset = useMemo(
+    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT)),
+    [events]
+  );
+
   const coinSwapAggByAsset = useMemo(
     () => sumByAsset(parsed.filter((r) => r.type === TYPE.COIN_SWAP_DEPOSIT || r.type === TYPE.COIN_SWAP_WITHDRAW)),
     [parsed]
@@ -638,11 +644,11 @@ export default function App() {
   // Symbol table blocks (filtered: no-only-referral symbols)
   const allSymbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
 
-  // Filter table by Row1 tile (asset)
+  // Apply symbol filter
   const symbolBlocks = useMemo(() => {
-    if (!filteredAsset) return allSymbolBlocks;
-    return allSymbolBlocks.filter((b) => b.realizedByAsset[filteredAsset!]);
-  }, [allSymbolBlocks, filteredAsset]);
+    if (symbolFilter === "ALL") return allSymbolBlocks;
+    return allSymbolBlocks.filter((b) => b.symbol === symbolFilter);
+  }, [allSymbolBlocks, symbolFilter]);
 
   function runParse(tsv: string) {
     setError("");
@@ -721,31 +727,7 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  /* ---------- totals used by Full text & health chips ---------- */
-  const eventsOrderByAsset = useMemo(
-    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER)),
-    [events]
-  );
-  const eventsPayoutByAsset = useMemo(
-    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT)),
-    [events]
-  );
-  const eventsNetByAsset = useMemo(() => {
-    const m: Record<string, { net: number }> = {};
-    const assets = new Set([
-      ...Object.keys(eventsOrderByAsset),
-      ...Object.keys(eventsPayoutByAsset),
-    ]);
-    assets.forEach((a) => {
-      const o = eventsOrderByAsset[a]?.net ?? 0;
-      const p = eventsPayoutByAsset[a]?.net ?? 0;
-      m[a] = { net: o + p };
-    });
-    return m;
-  }, [eventsOrderByAsset, eventsPayoutByAsset]);
-
   const totalByAsset = useMemo(() => {
-    // mirror buildFullResponse accumulation (without zero-suppression)
     const totals: Record<string, number> = {};
     const bump = (map: Record<string, { net: number }>) => {
       Object.entries(map).forEach(([a, v]) => (totals[a] = (totals[a] ?? 0) + (v?.net ?? 0)));
@@ -776,7 +758,6 @@ export default function App() {
     gridbotByAsset,
   ]);
 
-  /* ---------- Full Response builder ---------- */
   function buildFullResponse(): string {
     if (!rows.length) return "No data.";
 
@@ -868,7 +849,15 @@ export default function App() {
           );
         }
 
-        // Other types by asset (friendly names) for this asset
+        // Other types by asset (friendly names)
+        const otherByType: Record<string, { [asset: string]: { pos: number; neg: number; net: number } }> = {};
+        otherTypesNonEvent.forEach((r) => {
+          const bucket = (otherByType[r.type] = otherByType[r.type] || {});
+          const cur = (bucket[r.asset] = bucket[r.asset] || { pos: 0, neg: 0, net: 0 });
+          if (r.amount >= 0) cur.pos += r.amount; else cur.neg += abs(r.amount);
+          cur.net += r.amount;
+        });
+
         const otherLines: string[] = [];
         for (const [t, m] of Object.entries(otherByType)) {
           const v = m[asset];
@@ -965,7 +954,7 @@ export default function App() {
     copyText(L.join("\n"));
   }
 
-  // Copy all symbols as readable text
+  // Copy all symbols as readable text (ignores filter)
   function copyAllSymbolsText() {
     if (!allSymbolBlocks.length) return copyText("No symbol activity.");
     const L: string[] = ["By Symbol (Futures, not Events)", ""];
@@ -988,22 +977,15 @@ export default function App() {
     copyText(L.join("\n").trim());
   }
 
-  function saveSymbolsPng() {
-    if (!symbolBlocks.length) return;
-    drawSymbolsCanvas(symbolBlocks, "symbols_table.png");
-  }
-  function saveOneSymbolPng(b: SymbolBlock) {
-    drawSingleRowCanvas(b);
-  }
-
-  function downloadCsvFile(filename: string, data: Row[]) {
-    const blob = new Blob([toCsv(data)], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  // UI helpers
+  function focusSymbolRow(symbol?: string) {
+    if (!symbol) return;
+    setTimeout(() => {
+      const el = document.getElementById(`row-${symbol}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.animate([{ backgroundColor: "#fff2" }, { backgroundColor: "transparent" }], { duration: 1600 });
+    }, 60);
   }
 
   function runSelfTest() {
@@ -1033,24 +1015,19 @@ export default function App() {
     alert("Self-test passed ✅");
   }
 
-  /* ---------- KPIs & Health Checks ---------- */
-  // Per-symbol net (realized + funding + commission + insurance)
+  /* ---------- KPIs ---------- */
   const symbolNetStats = useMemo(() => {
-    const stats: { symbol: string; net: number; byAsset: Record<string, number> }[] = [];
+    const stats: { symbol: string; net: number }[] = [];
     allSymbolBlocks.forEach((b) => {
-      const addMap = (m: Record<string, { pos: number; neg: number }>, sign = 1) => {
-        Object.entries(m).forEach(([asset, v]) => {
-          const n = (v.pos - v.neg) * sign;
-          statsObj.byAsset[asset] = (statsObj.byAsset[asset] ?? 0) + n;
-          statsObj.net += n;
-        });
+      let net = 0;
+      const addMap = (m: Record<string, { pos: number; neg: number }>) => {
+        Object.values(m).forEach((v) => (net += v.pos - v.neg));
       };
-      const statsObj = { symbol: b.symbol, net: 0, byAsset: {} as Record<string, number> };
-      addMap(b.realizedByAsset, +1);
-      addMap(b.fundingByAsset, +1);
-      addMap(b.commByAsset, +1); // commission map already has pos refunds / neg fees — same sign
-      addMap(b.insByAsset, +1);
-      stats.push(statsObj);
+      addMap(b.realizedByAsset);
+      addMap(b.fundingByAsset);
+      addMap(b.commByAsset);
+      addMap(b.insByAsset);
+      stats.push({ symbol: b.symbol, net });
     });
     stats.sort((a, b) => b.net - a.net);
     return stats;
@@ -1067,82 +1044,6 @@ export default function App() {
       topLoser,
     };
   }, [nonEvent.length, allSymbolBlocks.length, topWinner, topLoser]);
-
-  // Health checks per-asset
-  const HEALTH = { FEE_RATIO: 0.35, FUNDING_DOM: 1.0, TRANSFER_IMPACT: 0.5, EVENTS_IMPACT: 0.25 };
-  const healthChips = useMemo(() => {
-    const chips: Array<{ key: string; text: string; action: () => void }> = [];
-    const assets = new Set([
-      ...Object.keys(realizedByAsset),
-      ...Object.keys(commissionByAsset),
-      ...Object.keys(fundingByAsset),
-      ...Object.keys(transfersByAsset),
-      ...Object.keys(eventsNetByAsset),
-    ]);
-    const jump = (selector: string) => () => {
-      const el = document.querySelector(selector) as HTMLElement | null;
-      if (!el) return;
-      el.scrollIntoView({ behavior: "smooth", block: "start" });
-    };
-
-    let anyCore = allSymbolBlocks.length > 0;
-
-    assets.forEach((asset) => {
-      const r = realizedByAsset[asset]?.net ?? 0;
-      const c = commissionByAsset[asset]?.net ?? 0;
-      const f = fundingByAsset[asset]?.net ?? 0;
-      const tr = transfersByAsset[asset]?.net ?? 0;
-      const ev = eventsNetByAsset[asset]?.net ?? 0;
-      const total = totalByAsset[asset] ?? 0;
-      const absR = abs(r);
-
-      if (absR >= 10 * EPS && abs(c) / absR > HEALTH.FEE_RATIO) {
-        chips.push({ key: `fee-${asset}`, text: `⚠️ High fees vs PnL in ${asset}`, action: jump("h3:contains('Trading Fees')") });
-      }
-      if (abs(f) > absR) {
-        chips.push({ key: `fund-${asset}`, text: `ℹ️ Funding > PnL in ${asset}`, action: jump("h3:contains('Funding Fees')") });
-      }
-      if (abs(tr) > HEALTH.TRANSFER_IMPACT * abs(total)) {
-        chips.push({ key: `tr-${asset}`, text: `↔ Transfers drive net in ${asset}`, action: jump("h3:contains('Transfers')") });
-      }
-      if (abs(ev) > HEALTH.EVENTS_IMPACT * abs(total)) {
-        chips.push({
-          key: `ev-${asset}`,
-          text: `🎯 Events materially affect ${asset}`,
-          action: () => setActiveTab("events"),
-        });
-      }
-    });
-
-    if (!anyCore && rows.length > 0) {
-      chips.push({ key: "no-core", text: "🧪 Only rebates/other types — no core trading", action: jump("h3:contains('Other Types')") });
-    }
-
-    if (!chips.length) {
-      chips.push({ key: "ok", text: "✅ Looks good", action: () => {} });
-    }
-    return chips;
-  }, [
-    realizedByAsset,
-    commissionByAsset,
-    fundingByAsset,
-    transfersByAsset,
-    eventsNetByAsset,
-    totalByAsset,
-    allSymbolBlocks.length,
-    rows.length,
-  ]);
-
-  // helper for scrolling to a symbol row
-  function focusSymbolRow(symbol?: string) {
-    if (!symbol) return;
-    setTimeout(() => {
-      const el = document.getElementById(`row-${symbol}`);
-      if (!el) return;
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.animate([{ backgroundColor: "#fff2" }, { backgroundColor: "transparent" }], { duration: 1600 });
-    }, 60);
-  }
 
   return (
     <div className="wrap">
@@ -1229,68 +1130,55 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-
-          {/* === Sticky 3-row header === */}
+          {/* === 2-row sticky header === */}
           <div className="kpi sticky card" aria-label="Summary header">
-            {/* Row 1 — Per-asset realized PnL (USDT/USDC/BNFCR only) */}
+            {/* Row 1 — Per-asset realized PnL pills (no net) */}
             <div className="kpi-row tiles">
               {["USDT", "USDC", "BNFCR"].map((a) => {
                 const v = realizedByAsset[a];
                 if (!v) return null;
-                const active = filteredAsset === a;
                 return (
-                  <button
-                    key={a}
-                    className={`tile ${active ? "active" : ""}`}
-                    onClick={() => setFilteredAsset(active ? null : a)}
-                    aria-pressed={active}
-                    title={`Filter By Symbol to ${a}`}
-                  >
+                  <div key={a} className="tile" title={`Realized PnL in ${a}`}>
                     <div className="tile-head">{a}</div>
-                    <div className={`tile-big ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</div>
                     <div className="tile-sub">
-                      <span className="good">+{fmtAbs(v.pos)}</span> / <span className="bad">−{fmtAbs(v.neg)}</span>
+                      <span className="good">+{fmtAbs(v.pos)}</span> • <span className="bad">−{fmtAbs(v.neg)}</span>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
+            </div>
+
+            {/* Row 2 — KPIs + actions (wrap) */}
+            <div className="kpi-row topbar">
+              <div className="kpigrid">
+                <div className="kpi-block">
+                  <div className="kpi-title">Trades parsed</div>
+                  <div className="kpi-num">{kpis.tradesParsed}</div>
+                </div>
+                <div className="kpi-block">
+                  <div className="kpi-title">Active symbols</div>
+                  <div className="kpi-num">{kpis.activeSymbols}</div>
+                </div>
+                <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topWinner?.symbol)} disabled={!kpis.topWinner}>
+                  <div className="kpi-title">Top winner</div>
+                  <div className="kpi-num">{kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}</div>
+                </button>
+                <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topLoser?.symbol)} disabled={!kpis.topLoser}>
+                  <div className="kpi-title">Top loser</div>
+                  <div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
+                </button>
+              </div>
+
               <div className="kpi-actions btn-row">
                 <button className="btn btn-success" onClick={copySummary}>Copy Summary (no Swaps)</button>
                 <button className="btn" onClick={copyFullResponse}>Copy Response (Full)</button>
                 <button className="btn" onClick={openFullPreview}>Preview/Edit Full Response</button>
               </div>
             </div>
-
-            {/* Row 2 — KPIs */}
-            <div className="kpi-row kpigrid">
-              <div className="kpi-block">
-                <div className="kpi-title">Trades parsed</div>
-                <div className="kpi-num">{kpis.tradesParsed}</div>
-              </div>
-              <div className="kpi-block">
-                <div className="kpi-title">Active symbols</div>
-                <div className="kpi-num">{kpis.activeSymbols}</div>
-              </div>
-              <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topWinner?.symbol)} disabled={!kpis.topWinner}>
-                <div className="kpi-title">Top winner (symbol)</div>
-                <div className="kpi-num">{kpis.topWinner ? `${kpis.topWinner.symbol} ${fmtSigned(kpis.topWinner.net)}` : "—"}</div>
-              </button>
-              <button className="kpi-block as-btn" onClick={() => focusSymbolRow(kpis.topLoser?.symbol)} disabled={!kpis.topLoser}>
-                <div className="kpi-title">Top loser (symbol)</div>
-                <div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
-              </button>
-            </div>
-
-            {/* Row 3 — Health checks */}
-            <div className="kpi-row chips">
-              {healthChips.map((c) => (
-                <button key={c.key} className="chip" onClick={c.action}>{c.text}</button>
-              ))}
-            </div>
           </div>
-          {/* === End sticky header === */}
+          {/* === /header === */}
 
-          {/* Main cards grid */}
+          {/* Main cards grid (unchanged) */}
           <div className="grid three">
             <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
             <RpnCard title="Referral Kickback" map={referralByAsset} />
@@ -1352,8 +1240,30 @@ export default function App() {
 
           {/* By Symbol */}
           <div className="subcard">
-            <div className="card-head" style={{ padding: 0, marginBottom: 8 }}>
-              <h3>By Symbol (Futures, not Events){filteredAsset ? ` — filtered: ${filteredAsset}` : ""}</h3>
+            <div className="card-head" style={{ padding: 0, marginBottom: 8, gap: 12 }}>
+              <div className="leftbar">
+                <h3 style={{ marginRight: 8 }}>By Symbol (Futures, not Events)</h3>
+                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span>Filter:</span>
+                  <select
+                    className="select"
+                    value={symbolFilter}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSymbolFilter(val);
+                      if (val !== "ALL") focusSymbolRow(val);
+                    }}
+                  >
+                    <option value="ALL">All symbols</option>
+                    {allSymbolBlocks.map((b) => (
+                      <option key={b.symbol} value={b.symbol}>{b.symbol}</option>
+                    ))}
+                  </select>
+                  {symbolFilter !== "ALL" && (
+                    <button className="btn btn-small" onClick={() => setSymbolFilter("ALL")}>Clear</button>
+                  )}
+                </label>
+              </div>
               <div className="btn-row">
                 <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
                 <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
@@ -1384,7 +1294,7 @@ export default function App() {
                         <td className="actions">
                           <div className="btn-row">
                             <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
-                            <button className="btn btn-small" onClick={() => saveOneSymbolPng(b)}>Save PNG</button>
+                            <button className="btn btn-small" onClick={() => drawSingleRowCanvas(b)}>Save PNG</button>
                           </div>
                         </td>
                       </tr>
@@ -1411,7 +1321,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid two">
+            <div className="grid two" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
               <div>
                 <h4 className="muted">Coin Swaps</h4>
                 {coinSwapLines.length ? (
@@ -1668,33 +1578,24 @@ const css = `
 .table .label{font-weight:600}
 .table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .table.small td,.table.small th{padding:8px 10px}
+.select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff}
+.leftbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .list{margin:0;padding:0 0 0 18px}
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
-
-/* Sticky KPI header (3 rows) */
-.kpi.sticky{position:sticky; top:8px; z-index:5}
-.kpi-row{display:grid; gap:10px; align-items:center}
-.kpi-row.tiles{grid-template-columns:repeat(3,minmax(160px,1fr)) auto}
-.kpi-row.kpigrid{grid-template-columns:repeat(4,minmax(160px,1fr))}
-.kpi-row.chips{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
-.kpi-actions{justify-self:end}
-.tile{display:flex; flex-direction:column; align-items:flex-start; text-align:left; background:#fbfcfe; border:1px solid var(--line); border-radius:12px; padding:10px 12px; cursor:pointer}
-.tile:hover{background:#f6f8ff}
-.tile.active{box-shadow:0 0 0 2px var(--primary) inset; background:#f3f6ff}
-.tile-head{font-size:12px; color:var(--muted); font-weight:700; margin-bottom:2px}
-.tile-big{font-weight:800; font-size:18px; line-height:1.2}
-.tile-sub{font-size:12px; color:var(--muted)}
-.kpi-block{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
-.kpi-title{font-size:12px;color:var(--muted);margin-bottom:4px}
-.kpi-num{font-weight:800}
-.kpi-block.as-btn{cursor:pointer; text-align:left}
-.kpi-block.as-btn:disabled{opacity:.5; cursor:not-allowed}
-.chip{border:1px solid var(--line); background:#fff; padding:8px 10px; border-radius:999px; text-align:left; cursor:pointer}
-.chip:hover{background:#f9fafb}
-
 .pair{display:inline-block;margin-right:2px}
 .actions{min-width:200px}
+
+/* Sticky KPI header (2 rows) */
+.kpi.sticky{position:sticky; top:8px; z-index:5}
+.kpi-row{display:grid; gap:10px; align-items:center}
+.kpi-row.tiles{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.kpi-row.topbar{grid-template-columns:1fr auto; align-items:start}
+.kpigrid{display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.kpi-actions{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end}
+.tile{display:flex; flex-direction:column; align-items:flex-start; text-align:left; background:#fbfcfe; border:1px solid var(--line); border-radius:12px; padding:10px 12px}
+.tile-head{font-size:12px; color:var(--muted); font-weight:700; margin-bottom:2px}
+.tile-sub{font-size:13px}
 
 /* Dropzone */
 .dropzone{
@@ -1709,13 +1610,4 @@ const css = `
 .modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
-
-/* Responsive */
-@media (max-width: 900px){
-  .kpi-row.tiles{grid-template-columns:repeat(2,minmax(160px,1fr)) auto}
-  .kpi-row.kpigrid{grid-template-columns:repeat(2,minmax(160px,1fr))}
-}
-@media (max-width: 640px){
-  .kpi-row.tiles{grid-template-columns:repeat(1,minmax(160px,1fr)) auto}
-}
 `;
