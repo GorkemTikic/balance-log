@@ -1,19 +1,13 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 /**
- * Balance Log Analyzer (UTC+0) — Light theme with colors
- *
- * This version fixes & adds:
- * 1) Save Symbols PNG: generates a single PNG for all visible symbols (and per‑row PNGs).
- * 2) Copy Symbols (text): clean, per‑symbol report layout (indented, readable).
- * 3) Per‑row actions on By‑Symbol: “Copy” and “Save PNG”.
- * 4) Colored UI: positives (green), negatives (red), subtle card tones.
- * 5) Keeps layout guardrails and all previous features (UTC+0, zero suppression, events separate, etc.).
+ * Balance Log Analyzer — light theme, UTC+0
+ * - GridPasteBox (paste table from web)
+ * - Summary cards (includes “Other Types (non-event)” in-card, above By Symbol)
+ * - By Symbol with per-row Copy / Save PNG (sticky Actions)
+ * - Coin Swaps tab split: Auto-Exchange vs Coin Swaps
+ * - “Save Symbols PNG” exports the whole table as one tall PNG
  */
-
-/* ===========================
-   Types & constants
-=========================== */
 
 type Row = {
   id: string;
@@ -27,21 +21,10 @@ type Row = {
   raw: string;
 };
 
-type SymbolBlock = {
-  symbol: string;
-  realizedByAsset: Record<string, Sum>;
-  fundingByAsset: Record<string, Sum>;
-  commByAsset: Record<string, Sum>;
-  insByAsset: Record<string, Sum>;
-};
-
-type Sum = { pos: number; neg: number; net: number };
-
 const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0
 const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB)$/;
 
-const SWAP_TYPES = new Set(["COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW"]);
-const AUTO_EXCHANGE = "AUTO_EXCHANGE";
+const SWAP_TYPES = new Set(["COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW", "AUTO_EXCHANGE"]);
 const EVENT_PREFIX = "EVENT_CONTRACTS_";
 const EVENT_KNOWN_CORE = new Set(["EVENT_CONTRACTS_ORDER", "EVENT_CONTRACTS_PAYOUT"]);
 const KNOWN_TYPES = new Set([
@@ -53,15 +36,11 @@ const KNOWN_TYPES = new Set([
   "REFERRAL_KICKBACK",
   "TRANSFER",
   ...Array.from(SWAP_TYPES),
-  AUTO_EXCHANGE,
 ]);
 
-const EPS = 1e-12; // zero suppression threshold
+const EPS = 1e-12;
 
-/* ===========================
-   Format utils
-=========================== */
-
+/* ---------- utils ---------- */
 function fmtAbs(x: number, maxDp = 8) {
   const v = Math.abs(Number(x) || 0);
   const s = v.toFixed(maxDp);
@@ -72,14 +51,9 @@ function fmtSigned(x: number, maxDp = 8) {
   const sign = n >= 0 ? "+" : "−";
   return `${sign}${fmtAbs(n, maxDp)}`;
 }
-function sumMap(map: Record<string, Sum>) {
-  let s = 0;
-  Object.values(map).forEach((v) => (s += Math.abs(v.pos) + Math.abs(v.neg)));
-  return s;
-}
-function toCsv(rows: Row[]) {
+function toCsv<T extends object>(rows: T[]) {
   if (!rows.length) return "";
-  const headers = Object.keys(rows[0]) as (keyof Row)[];
+  const headers = Object.keys(rows[0]) as (keyof T)[];
   const escape = (v: unknown) => {
     const s = String(v ?? "");
     if (/[,"\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
@@ -88,21 +62,18 @@ function toCsv(rows: Row[]) {
   const body = rows.map((r) => headers.map((h) => escape((r as any)[h])).join(","));
   return [headers.join(","), ...body].join("\n");
 }
+const sumMapMagnitude = (m: Record<string, { pos: number; neg: number }>) =>
+  Object.values(m).reduce((acc, v) => acc + Math.abs(v.pos) + Math.abs(v.neg), 0);
 
-/* ===========================
-   Parsing
-=========================== */
-
+/* ---------- parsing ---------- */
 function splitColumns(line: string) {
   if (line.includes("\t")) return line.split(/\t+/);
-  // very lenient fallback
   return line.trim().split(/\s{2,}|\s\|\s|\s+/);
 }
 function firstDateIn(line: string) {
   const m = line.match(DATE_RE);
   return m ? m[1] : "";
 }
-
 function parseBalanceLog(text: string) {
   const rows: Row[] = [];
   const diags: string[] = [];
@@ -159,12 +130,9 @@ function parseBalanceLog(text: string) {
   return { rows, diags };
 }
 
-/* ===========================
-   Aggregation
-=========================== */
-
+/* ---------- aggregation ---------- */
 function sumByAsset(rows: Row[]) {
-  const acc: Record<string, Sum> = {};
+  const acc: Record<string, { pos: number; neg: number; net: number }> = {};
   for (const r of rows) {
     const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
     if (r.amount >= 0) a.pos += r.amount;
@@ -173,12 +141,9 @@ function sumByAsset(rows: Row[]) {
   }
   return acc;
 }
-function onlyEvents(rows: Row[]) {
-  return rows.filter((r) => r.type.startsWith(EVENT_PREFIX));
-}
-function onlyNonEvents(rows: Row[]) {
-  return rows.filter((r) => !r.type.startsWith(EVENT_PREFIX));
-}
+const onlyEvents = (rows: Row[]) => rows.filter((r) => r.type.startsWith(EVENT_PREFIX));
+const onlyNonEvents = (rows: Row[]) => rows.filter((r) => !r.type.startsWith(EVENT_PREFIX));
+
 function groupBySymbol(rows: Row[]) {
   const m = new Map<string, Row[]>();
   for (const r of rows) {
@@ -189,9 +154,16 @@ function groupBySymbol(rows: Row[]) {
   }
   return m;
 }
-function bySymbolSummary(nonEventRows: Row[]): SymbolBlock[] {
+
+function bySymbolSummary(nonEventRows: Row[]) {
   const sym = groupBySymbol(nonEventRows);
-  const out: SymbolBlock[] = [];
+  const out: Array<{
+    symbol: string;
+    realizedByAsset: Record<string, any>;
+    fundingByAsset: Record<string, any>;
+    commByAsset: Record<string, any>;
+    insByAsset: Record<string, any>;
+  }> = [];
 
   for (const [symbol, rs] of sym.entries()) {
     const realized = rs.filter((r) => r.type === "REALIZED_PNL");
@@ -199,24 +171,36 @@ function bySymbolSummary(nonEventRows: Row[]): SymbolBlock[] {
     const comm = rs.filter((r) => r.type === "COMMISSION");
     const ins = rs.filter((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
 
+    const realizedByAsset = sumByAsset(realized);
+    const fundingByAsset = sumByAsset(funding);
+    const commByAsset = sumByAsset(comm);
+    const insByAsset = sumByAsset(ins);
+
+    // FILTER OUT: if there is no Realized PnL, no Commission, and no Funding (across all assets)
+    const coreMagnitude =
+      sumMapMagnitude(realizedByAsset) +
+      sumMapMagnitude(fundingByAsset) +
+      sumMapMagnitude(commByAsset);
+
+    if (coreMagnitude <= EPS) continue;
+
     out.push({
       symbol,
-      realizedByAsset: sumByAsset(realized),
-      fundingByAsset: sumByAsset(funding),
-      commByAsset: sumByAsset(comm),
-      insByAsset: sumByAsset(ins),
+      realizedByAsset,
+      fundingByAsset,
+      commByAsset,
+      insByAsset,
     });
   }
   out.sort((a, b) => a.symbol.localeCompare(b.symbol));
   return out;
 }
 
-/* ready response lines for swaps & auto-exchange (separate) */
-type ReadyLine = { time: string; text: string };
-function groupedSwapAndAuto(rows: Row[]) {
-  const relevant = rows.filter((r) => SWAP_TYPES.has(r.type) || r.type === AUTO_EXCHANGE);
+function coinSwapGroups(rows: Row[]) {
+  const swaps = rows.filter((r) => SWAP_TYPES.has(r.type));
   const map = new Map<string, Row[]>();
-  for (const r of relevant) {
+
+  for (const r of swaps) {
     const idHint = (r.extra && r.extra.split("@")[0]) || "";
     const key = `${r.time}|${idHint}`;
     const g = map.get(key) || [];
@@ -224,9 +208,7 @@ function groupedSwapAndAuto(rows: Row[]) {
     map.set(key, g);
   }
 
-  const coinSwaps: ReadyLine[] = [];
-  const autoEx: ReadyLine[] = [];
-
+  const lines: { time: string; kind: "AUTO_EXCHANGE" | "COIN_SWAP"; text: string }[] = [];
   for (const [, group] of map.entries()) {
     const t = group[0].time;
     const byAsset = new Map<string, number>();
@@ -238,21 +220,17 @@ function groupedSwapAndAuto(rows: Row[]) {
       if (amt < 0) outs.push(`${fmtSigned(amt)} ${asset}`);
       if (amt > 0) ins.push(`${fmtSigned(amt)} ${asset}`);
     }
-    const line = `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}`;
-
-    if (group.some((g) => g.type === AUTO_EXCHANGE)) autoEx.push({ time: t, text: line });
-    else coinSwaps.push({ time: t, text: line });
+    lines.push({
+      time: t,
+      kind: group.some((g) => g.type === "AUTO_EXCHANGE") ? "AUTO_EXCHANGE" : "COIN_SWAP",
+      text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}`,
+    });
   }
-
-  coinSwaps.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-  autoEx.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-  return { coinSwaps, autoEx };
+  lines.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+  return lines;
 }
 
-/* ===========================
-   Paste: Excel-like + fallback
-=========================== */
-
+/* ---------- Excel-like paste box ---------- */
 function GridPasteBox({
   onUseTSV,
   onError,
@@ -282,7 +260,6 @@ function GridPasteBox({
     best.querySelectorAll("tr").forEach((tr) => {
       const cells = Array.from(tr.querySelectorAll<HTMLElement>("th,td"));
       const row = cells.map((c) => (c.textContent ?? "").trim());
-      // keep empty cells to preserve indexes
       if (row.length) rows.push(row);
     });
     return rows;
@@ -296,7 +273,7 @@ function GridPasteBox({
         .filter((l) => l.trim().length)
         .map((l) => l.split("\t"));
     }
-    // very last resort: split by multiple spaces
+    // last resort: multiple spaces / pipes
     return text
       .split(/\r?\n/)
       .filter((l) => l.trim().length)
@@ -340,7 +317,6 @@ function GridPasteBox({
         suppressContentEditableWarning
         onPaste={handlePaste}
         onKeyDown={(e) => {
-          // Prevent typing inside; we only want paste
           if (!(e.ctrlKey || e.metaKey) || (e.key.toLowerCase() !== "v" && e.key !== "V")) {
             e.preventDefault();
           }
@@ -375,16 +351,13 @@ function GridPasteBox({
   );
 }
 
-/* ===========================
-   Small UI helpers
-=========================== */
-
+/* ---------- UI helpers ---------- */
 function RpnCard({
   title,
   map,
 }: {
   title: string;
-  map: Record<string, Sum>;
+  map: Record<string, { pos: number; neg: number; net: number }>;
 }) {
   const keys = Object.keys(map);
   return (
@@ -399,9 +372,9 @@ function RpnCard({
             return (
               <li key={asset} className="kv-row">
                 <span className="label">{asset}</span>
-                <span className="num pos">+{fmtAbs(v.pos)}</span>
-                <span className="num neg">−{fmtAbs(v.neg)}</span>
-                <span className={`num ${v.net >= 0 ? "pos" : "neg"}`}>{fmtSigned(v.net)}</span>
+                <span className="num good">+{fmtAbs(v.pos)}</span>
+                <span className="num bad">−{fmtAbs(v.neg)}</span>
+                <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
               </li>
             );
           })}
@@ -413,78 +386,87 @@ function RpnCard({
   );
 }
 
-function hasCoreSymbolActivity(b: SymbolBlock) {
-  return sumMap(b.realizedByAsset) > EPS || sumMap(b.fundingByAsset) > EPS || sumMap(b.commByAsset) > EPS;
-}
-
-function AssetPairsCell({ map }: { map: Record<string, Sum> }) {
+function renderAssetPairs(map: Record<string, { pos: number; neg: number; net: number }>) {
   const entries = Object.entries(map);
-  if (!entries.length) return <span className="muted">–</span>;
+  if (!entries.length) return <span>–</span>;
   return (
-    <div className="pairs">
-      {entries.map(([asset, v]) => (
-        <div key={asset} className="pair">
-          <span className="num pos">+{fmtAbs(v.pos)}</span>
-          <span className="sep">/</span>
-          <span className="num neg">−{fmtAbs(v.neg)}</span>
-          <span className="asset">{asset}</span>
-        </div>
+    <>
+      {entries.map(([asset, v], i) => (
+        <span key={asset} className="pair">
+          <span className="good">+{fmtAbs(v.pos)}</span>
+          {" / "}
+          <span className="bad">−{fmtAbs(v.neg)}</span>
+          {" "}{asset}{i < entries.length - 1 ? ", " : ""}
+        </span>
       ))}
-    </div>
+    </>
   );
 }
 
-/* ===========================
-   Canvas render for PNGs
-=========================== */
-
-function drawSymbolOnCtx(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  b: SymbolBlock,
-  maxWidth: number
-): number {
-  const lh = 20;
-  ctx.fillStyle = "#0f1720";
-  ctx.font = "bold 15px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial";
-  ctx.fillText(b.symbol, x, y);
-  let cy = y + lh;
-
-  const drawSection = (title: string, map: Record<string, Sum>) => {
-    if (sumMap(map) <= EPS) return;
-    ctx.fillStyle = "#6b7785";
-    ctx.font = "bold 13px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial";
-    ctx.fillText(title, x + 14, cy);
-    cy += lh - 4;
-    ctx.fillStyle = "#0f1720";
-    ctx.font = "13px ui-monospace, Menlo, Consolas, monospace";
-    Object.entries(map).forEach(([asset, v]) => {
-      const line = `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${asset}`;
-      ctx.fillText(line, x + 28, cy);
-      cy += lh - 2;
-    });
-  };
-
-  drawSection("Realized PnL:", b.realizedByAsset);
-  drawSection("Funding:", b.fundingByAsset);
-  drawSection("Trading Fees:", b.commByAsset);
-  drawSection("Insurance/Liquidation:", b.insByAsset);
-
-  // divider
-  ctx.strokeStyle = "#e6e9ee";
-  ctx.beginPath();
-  ctx.moveTo(x, cy + 6);
-  ctx.lineTo(x + maxWidth - 32, cy + 6);
-  ctx.stroke();
-
-  return cy + 16;
+function pairsToText(map: Record<string, { pos: number; neg: number }>) {
+  const entries = Object.entries(map);
+  if (!entries.length) return "–";
+  return entries.map(([a, v]) => `+${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`).join("; ");
 }
 
-/* ===========================
-   Main App
-=========================== */
+/* ---------- PNG helpers (no deps) ---------- */
+async function elementToPng(el: HTMLElement, filename: string) {
+  const width = Math.ceil(el.scrollWidth);
+  const height = Math.ceil(el.scrollHeight);
+  const svgNS = "http://www.w3.org/2000/svg";
+  const xhtmlNS = "http://www.w3.org/1999/xhtml";
 
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone.style.margin = "0";
+  clone.style.background = "#fff";
+
+  const wrapper = document.createElement("div");
+  wrapper.setAttribute("xmlns", xhtmlNS);
+  wrapper.style.width = width + "px";
+  wrapper.style.height = height + "px";
+  wrapper.appendChild(clone);
+
+  const foreign = document.createElementNS(svgNS, "foreignObject");
+  foreign.setAttribute("x", "0");
+  foreign.setAttribute("y", "0");
+  foreign.setAttribute("width", String(width));
+  foreign.setAttribute("height", String(height));
+  foreign.appendChild(wrapper);
+
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("xmlns", svgNS);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.appendChild(foreign);
+
+  const data = new XMLSerializer().serializeToString(svg);
+  const blob = new Blob([data], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const img = new Image();
+  await new Promise((res) => {
+    img.onload = () => res(null);
+    img.src = url;
+  });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0);
+  URL.revokeObjectURL(url);
+
+  const pngUrl = canvas.toDataURL("image/png");
+  const a = document.createElement("a");
+  a.href = pngUrl;
+  a.download = filename;
+  a.click();
+}
+
+/* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
@@ -492,15 +474,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"summary" | "swaps" | "events" | "raw">("summary");
   const [error, setError] = useState("");
 
-  // Full response preview modal
-  const [showFullPreview, setShowFullPreview] = useState(false);
-  const [fullPreviewText, setFullPreviewText] = useState("");
-
   const parsed = rows;
   const nonEvent = useMemo(() => onlyNonEvents(parsed), [parsed]);
   const events = useMemo(() => onlyEvents(parsed), [parsed]);
 
-  // Core groupings
   const realizedNonEvent = useMemo(() => nonEvent.filter((r) => r.type === "REALIZED_PNL"), [nonEvent]);
   const commission = useMemo(() => parsed.filter((r) => r.type === "COMMISSION"), [parsed]);
   const referralKick = useMemo(() => parsed.filter((r) => r.type === "REFERRAL_KICKBACK"), [parsed]);
@@ -511,29 +488,25 @@ export default function App() {
   );
   const transfers = useMemo(() => parsed.filter((r) => r.type === "TRANSFER"), [parsed]);
 
-  // Swaps & Auto-Exchange
-  const { coinSwaps, autoEx } = useMemo(() => groupedSwapAndAuto(parsed), [parsed]);
+  const swapLines = useMemo(() => coinSwapGroups(parsed), [parsed]);
+  const swapAuto = swapLines.filter((s) => s.kind === "AUTO_EXCHANGE");
+  const swapCoin = swapLines.filter((s) => s.kind === "COIN_SWAP");
 
-  // Other groupings
   const otherTypesNonEvent = useMemo(
     () => parsed.filter((r) => !KNOWN_TYPES.has(r.type) && !r.type.startsWith(EVENT_PREFIX)),
     [parsed]
   );
   const eventOther = useMemo(() => events.filter((r) => !EVENT_KNOWN_CORE.has(r.type)), [events]);
 
-  // Per-asset summaries
   const realizedByAsset = useMemo(() => sumByAsset(realizedNonEvent), [realizedNonEvent]);
   const commissionByAsset = useMemo(() => sumByAsset(commission), [commission]);
   const referralByAsset = useMemo(() => sumByAsset(referralKick), [referralKick]);
   const fundingByAsset = useMemo(() => sumByAsset(funding), [funding]);
   const insuranceByAsset = useMemo(() => sumByAsset(insurance), [insurance]);
   const transfersByAsset = useMemo(() => sumByAsset(transfers), [transfers]);
+  const symbolBlocks = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]); // filtered
 
-  // By-symbol (hide referral-only symbols)
-  const symbolBlocksRaw = useMemo(() => bySymbolSummary(nonEvent), [nonEvent]);
-  const symbolBlocks = useMemo(() => symbolBlocksRaw.filter((b) => hasCoreSymbolActivity(b)), [symbolBlocksRaw]);
-
-  /* -------- parse triggers -------- */
+  const tableRef = useRef<HTMLTableElement | null>(null);
 
   function runParse(tsv: string) {
     setError("");
@@ -549,6 +522,7 @@ export default function App() {
       setDiags([]);
     }
   }
+
   function onParse() {
     runParse(input);
   }
@@ -561,9 +535,7 @@ export default function App() {
     }
   }
 
-  /* -------- copy helpers -------- */
-
-  function sectionCopy(text: string) {
+  function copyText(text: string) {
     if (!navigator.clipboard) return alert("Clipboard API not available");
     navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
   }
@@ -585,7 +557,7 @@ export default function App() {
     };
     pushPL("Realized PnL (Futures, not Events)", realizedByAsset);
 
-    const pushRPN = (title: string, map: Record<string, Sum>) => {
+    const pushRPN = (title: string, map: Record<string, { pos: number; neg: number; net: number }>) => {
       const keys = Object.keys(map);
       if (!keys.length) return;
       L.push(title + ":");
@@ -619,11 +591,11 @@ export default function App() {
           });
         });
     }
-    sectionCopy(L.join("\n"));
+    copyText(L.join("\n"));
   }
 
-  function buildFullResponse(): string {
-    if (!rows.length) return "No data.";
+  function copyFullResponse() {
+    if (!rows.length) return copyText("No data.");
 
     const collect = (pred: (r: Row) => boolean) => sumByAsset(rows.filter(pred));
 
@@ -632,10 +604,10 @@ export default function App() {
     const refkick = collect((r) => r.type === "REFERRAL_KICKBACK");
     const fund = collect((r) => r.type === "FUNDING_FEE");
     const ins = collect((r) => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
-    const swapsAgg = collect((r) => SWAP_TYPES.has(r.type) || r.type === AUTO_EXCHANGE);
+    const swapsAgg = collect((r) => SWAP_TYPES.has(r.type));
     const evOrder = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_ORDER"));
     const evPay = sumByAsset(events.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT"));
-    const transfer = collect((r) => r.type === "TRANSFER"); // included in totals only
+    const transfer = collect((r) => r.type === "TRANSFER");
 
     const total: Record<string, number> = {};
     const bump = (a: string, v: number) => (total[a] = (total[a] ?? 0) + v);
@@ -703,11 +675,11 @@ export default function App() {
           pushIf(i.neg > EPS, `  Liquidation Clearance Fee Paid in ${asset}: −${fmtAbs(i.neg)}`);
         }
         if (sw) {
-          pushIf(sw.pos > EPS, `  The Coin-Swap Received ${asset}: +${fmtAbs(sw.pos)}`);
-          pushIf(sw.neg > EPS, `  The Coin-Swap Used ${asset}: −${fmtAbs(sw.neg)}`);
+          pushIf(sw.pos > EPS, `  Coin-Swap/Auto-Exchange Received ${asset}: +${fmtAbs(sw.pos)}`);
+          pushIf(sw.neg > EPS, `  Coin-Swap/Auto-Exchange Used ${asset}: −${fmtAbs(sw.neg)}`);
         }
-        if (ep) pushIf(ep.pos > EPS, `  The Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
-        if (eo) pushIf(eo.neg > EPS, `  The Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
+        if (ep) pushIf(ep.pos > EPS, `  Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
+        if (eo) pushIf(eo.neg > EPS, `  Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
 
         const net = total[asset] ?? 0;
         pushIf(
@@ -717,165 +689,14 @@ export default function App() {
         L.push("");
       });
 
-    return L.join("\n").replace(/\n{3,}/g, "\n\n");
+    copyText(L.join("\n").replace(/\n{3,}/g, "\n\n"));
   }
 
-  function copyFullResponse() {
-    sectionCopy(buildFullResponse());
-  }
-  function openFullPreview() {
-    setFullPreviewText(buildFullResponse());
-    setShowFullPreview(true);
-  }
-
-  /* -------- symbol reports / PNG -------- */
-
-  function symbolReportText(b: SymbolBlock) {
-    const L: string[] = [];
-    L.push(`Symbol: ${b.symbol}`);
-    if (sumMap(b.realizedByAsset) > EPS) {
-      L.push("  Realized PnL:");
-      Object.entries(b.realizedByAsset).forEach(([a, v]) => L.push(`    +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`));
-    }
-    if (sumMap(b.fundingByAsset) > EPS) {
-      L.push("  Funding:");
-      Object.entries(b.fundingByAsset).forEach(([a, v]) => L.push(`    +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`));
-    }
-    if (sumMap(b.commByAsset) > EPS) {
-      L.push("  Trading Fees:");
-      Object.entries(b.commByAsset).forEach(([a, v]) => L.push(`    +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`));
-    }
-    if (sumMap(b.insByAsset) > EPS) {
-      L.push("  Insurance/Liquidation:");
-      Object.entries(b.insByAsset).forEach(([a, v]) => L.push(`    +${fmtAbs(v.pos)} / −${fmtAbs(v.neg)} ${a}`));
-    }
-    return L.join("\n");
-  }
-
-  function copyAllSymbolsText() {
-    if (!symbolBlocks.length) return sectionCopy("No symbol activity.");
-    const parts: string[] = [];
-    parts.push("By Symbol (Futures, not Events) — UTC+0\n");
-    symbolBlocks.forEach((b) => {
-      parts.push(symbolReportText(b));
-      parts.push("");
-    });
-    sectionCopy(parts.join("\n").trim());
-  }
-  function copyOneSymbolText(b: SymbolBlock) {
-    sectionCopy(symbolReportText(b));
-  }
-
-  function saveAllSymbolsPNG() {
-    if (!symbolBlocks.length) {
-      alert("No symbol activity.");
-      return;
-    }
-    const width = 960;
-    const padding = 20;
-    const header = 30;
-    const lineH = 20;
-
-    // Estimate height
-    let height = padding + header + padding;
-    for (const b of symbolBlocks) {
-      const l =
-        1 +
-        (sumMap(b.realizedByAsset) > EPS ? 1 + Object.keys(b.realizedByAsset).length : 0) +
-        (sumMap(b.fundingByAsset) > EPS ? 1 + Object.keys(b.fundingByAsset).length : 0) +
-        (sumMap(b.commByAsset) > EPS ? 1 + Object.keys(b.commByAsset).length : 0) +
-        (sumMap(b.insByAsset) > EPS ? 1 + Object.keys(b.insByAsset).length : 0) +
-        1; // divider
-      height += l * lineH + 10;
-    }
-    height += padding;
-
-    const canvas = document.createElement("canvas");
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    const ctx = canvas.getContext("2d")!;
-    ctx.scale(dpr, dpr);
-
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.fillStyle = "#0f1720";
-    ctx.font = "bold 16px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial";
-    ctx.fillText("By Symbol (Futures, not Events) — UTC+0", padding, padding + header - 8);
-
-    let y = padding + header + 8;
-    for (const b of symbolBlocks) {
-      y = drawSymbolOnCtx(ctx, padding, y, b, width);
-    }
-
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "symbols_report.png";
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  }
-
-  function saveOneSymbolPNG(b: SymbolBlock) {
-    const width = 720;
-    const padding = 20;
-    const header = 28;
-
-    let height = padding + header + padding + 40;
-    height +=
-      20 *
-      (1 +
-        (sumMap(b.realizedByAsset) > EPS ? 1 + Object.keys(b.realizedByAsset).length : 0) +
-        (sumMap(b.fundingByAsset) > EPS ? 1 + Object.keys(b.fundingByAsset).length : 0) +
-        (sumMap(b.commByAsset) > EPS ? 1 + Object.keys(b.commByAsset).length : 0) +
-        (sumMap(b.insByAsset) > EPS ? 1 + Object.keys(b.insByAsset).length : 0));
-
-    const canvas = document.createElement("canvas");
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    const ctx = canvas.getContext("2d")!;
-    ctx.scale(dpr, dpr);
-
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.fillStyle = "#0f1720";
-    ctx.font = "bold 16px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial";
-    ctx.fillText(`${b.symbol} — UTC+0`, padding, padding + header - 8);
-
-    ctx.font = "14px ui-monospace, Menlo, Consolas, monospace";
-    let y = padding + header + 8;
-    y = drawSymbolOnCtx(ctx, padding, y, b, width);
-
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${b.symbol}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  }
-
-  /* -------- swaps/events/raw copy -------- */
-
-  function copyCoinSwaps() {
-    const L: string[] = ["Coin Swaps (UTC+0)", ""];
-    if (!coinSwaps.length) L.push("None");
-    else coinSwaps.forEach((s) => L.push(`- ${s.text}`));
-    sectionCopy(L.join("\n"));
-  }
-  function copyAutoExchange() {
-    const L: string[] = ["Auto-Exchange (UTC+0)", ""];
-    if (!autoEx.length) L.push("None");
-    else autoEx.forEach((s) => L.push(`- ${s.text}`));
-    sectionCopy(L.join("\n"));
+  function copySwaps(list: { text: string }[], title: string) {
+    const L: string[] = [`${title} (UTC+0)`, ""];
+    if (!list.length) L.push("None");
+    else list.forEach((s) => L.push(`- ${s.text}`));
+    copyText(L.join("\n"));
   }
 
   function copyEvents() {
@@ -896,6 +717,7 @@ export default function App() {
       });
     }
 
+    const eventOther = events.filter((r) => !EVENT_KNOWN_CORE.has(r.type));
     if (eventOther.length) {
       L.push("", "Event – Other Activity:");
       const byType: Record<string, Row[]> = {};
@@ -913,7 +735,7 @@ export default function App() {
         });
     }
 
-    sectionCopy(L.join("\n"));
+    copyText(L.join("\n"));
   }
 
   function copyRaw() {
@@ -921,9 +743,63 @@ export default function App() {
     const headers = ["time", "type", "asset", "amount", "symbol", "id", "uid", "extra"];
     const L = [headers.join("\t")];
     rows.forEach((r) => L.push([r.time, r.type, r.asset, r.amount, r.symbol, r.id, r.uid, r.extra].join("\t")));
-    sectionCopy(L.join("\n"));
+    copyText(L.join("\n"));
   }
-  function downloadCsv(filename: string, data: Row[]) {
+
+  // Copy one symbol block
+  function copyOneSymbol(b: ReturnType<typeof bySymbolSummary>[number]) {
+    const L: string[] = [];
+    L.push(`${b.symbol} (UTC+0)`);
+    const push = (name: string, m: Record<string, { pos: number; neg: number }>) => {
+      const txt = pairsToText(m);
+      if (txt !== "–") L.push(`  ${name}: ${txt}`);
+    };
+    push("Realized PnL", b.realizedByAsset);
+    push("Funding", b.fundingByAsset);
+    push("Trading Fees", b.commByAsset);
+    push("Insurance", b.insByAsset);
+    copyText(L.join("\n"));
+  }
+
+  // Copy all symbols as a readable multi-section text
+  function copyAllSymbolsText() {
+    if (!symbolBlocks.length) return copyText("No symbol activity.");
+    const L: string[] = ["By Symbol (Futures, not Events)", ""];
+    symbolBlocks.forEach((b) => {
+      const lines: string[] = [];
+      const add = (name: string, m: Record<string, { pos: number; neg: number }>) => {
+        const txt = pairsToText(m);
+        if (txt !== "–") lines.push(`  ${name}: ${txt}`);
+      };
+      add("Realized PnL", b.realizedByAsset);
+      add("Funding", b.fundingByAsset);
+      add("Trading Fees", b.commByAsset);
+      add("Insurance", b.insByAsset);
+      if (lines.length) {
+        L.push(b.symbol);
+        L.push(...lines);
+        L.push("");
+      }
+    });
+    copyText(L.join("\n").trim());
+  }
+
+  // Save PNG of full symbols table
+  async function saveSymbolsPng() {
+    const table = tableRef.current;
+    if (!table) return;
+    const wrapper = table.closest(".tablewrap") as HTMLElement;
+    await elementToPng(wrapper, "symbols_table.png");
+  }
+
+  // Save PNG of one row
+  async function saveOneSymbolPng(symbol: string) {
+    const row = document.getElementById(`row-${symbol}`);
+    if (!row) return;
+    await elementToPng(row as HTMLElement, `${symbol}.png`);
+  }
+
+  function downloadCsvFile(filename: string, data: Row[]) {
     const blob = new Blob([toCsv(data)], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -932,8 +808,6 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   }
-
-  /* -------- self-test -------- */
 
   function runSelfTest() {
     const fixture = [
@@ -952,16 +826,12 @@ export default function App() {
     ].join("\n");
 
     const { rows: rs } = parseBalanceLog(fixture);
-    const { coinSwaps: cs, autoEx: ax } = groupedSwapAndAuto(rs);
-    if (cs.length !== 1 || ax.length !== 1) throw new Error("Swap/Auto grouping failed");
+    const lines = coinSwapGroups(rs);
+    if (lines.length !== 2) throw new Error("Swap grouping failed");
     if (!rs.some((r) => r.type === "REFERRAL_KICKBACK")) throw new Error("Referral Kickback missing");
     if (!rs.some((r) => r.type === "EVENT_CONTRACTS_FEE")) throw new Error("Event – Other missing");
     alert("Self-test passed ✅");
   }
-
-  /* ===========================
-     Render
-  =========================== */
 
   return (
     <div className="wrap">
@@ -970,6 +840,7 @@ export default function App() {
       <header className="header">
         <div>
           <h1>Balance Log Analyzer</h1>
+          <div className="muted">All times are UTC+0</div>
         </div>
         <div className="btn-row">
           <button className="btn btn-primary" onClick={onPasteAndParseText}>
@@ -981,7 +852,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Input */}
+      {/* Paste */}
       <section className="space">
         <GridPasteBox
           onUseTSV={(tsv) => {
@@ -991,21 +862,28 @@ export default function App() {
           onError={(m) => setError(m)}
         />
 
+        {/* Fallback textarea */}
         <details className="card" style={{ marginTop: 8 }}>
           <summary className="card-head" style={{ cursor: "pointer" }}>
             <h3>Manual Paste (fallback)</h3>
           </summary>
           <textarea
-            className="paste"
             placeholder="Paste raw text or TSV here"
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            className="paste"
           />
           <div className="btn-row" style={{ marginTop: 8 }}>
             <button className="btn btn-dark" onClick={onParse}>
               Parse
             </button>
-            <button className="btn" onClick={() => { setInput(""); setError(""); }}>
+            <button
+              className="btn"
+              onClick={() => {
+                setInput("");
+                setError("");
+              }}
+            >
               Clear
             </button>
           </div>
@@ -1050,22 +928,19 @@ export default function App() {
                 <button className="btn" onClick={copyFullResponse}>
                   Copy Response (Full)
                 </button>
-                <button className="btn" onClick={openFullPreview}>
-                  Preview/Edit Full Response
-                </button>
               </div>
             </div>
 
+            {/* Realized PnL tiles */}
             <div className="subcard">
               <h3>Realized PnL (Futures, not Events)</h3>
               {Object.keys(realizedByAsset).length ? (
                 <ul className="grid two">
                   {Object.entries(realizedByAsset).map(([asset, v]) => (
-                    <li key={asset} className={`pill ${v.net >= 0 ? "tone-pos" : "tone-neg"}`}>
-                      <span className="label">{asset}</span>
-                      <span className="num">
-                        <b className="pos">+{fmtAbs(v.pos)}</b> • <b className="neg">−{fmtAbs(v.neg)}</b>
-                      </span>
+                    <li key={asset} className="pill">
+                      <span className="label">{asset}</span>{" "}
+                      <span className="good">+{fmtAbs(v.pos)}</span> •{" "}
+                      <span className="bad">−{fmtAbs(v.neg)}</span>
                     </li>
                   ))}
                 </ul>
@@ -1074,28 +949,36 @@ export default function App() {
               )}
             </div>
 
-            {/* Top summary grid */}
+            {/* Main cards grid */}
             <div className="grid three">
               <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
               <RpnCard title="Referral Kickback" map={referralByAsset} />
               <RpnCard title="Funding Fees" map={fundingByAsset} />
               <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
               <RpnCard title="Transfers (General)" map={transfersByAsset} />
+
+              {/* Other Types moved UP here (inside cards area) */}
+              {otherTypesNonEvent.length > 0 && (
+                <div className="card">
+                  <div className="card-head"><h3>Other Types (non-event)</h3></div>
+                  <OtherTypesBlock rows={otherTypesNonEvent} />
+                </div>
+              )}
             </div>
 
             {/* By Symbol */}
             <div className="subcard">
-              <div className="card-head" style={{ marginBottom: 0 }}>
+              <div className="card-head" style={{ padding: 0, marginBottom: 8 }}>
                 <h3>By Symbol (Futures, not Events)</h3>
                 <div className="btn-row">
                   <button className="btn" onClick={copyAllSymbolsText}>Copy Symbols (text)</button>
-                  <button className="btn" onClick={saveAllSymbolsPNG}>Save Symbols PNG</button>
+                  <button className="btn" onClick={saveSymbolsPng}>Save Symbols PNG</button>
                 </div>
               </div>
 
               {symbolBlocks.length ? (
                 <div className="tablewrap">
-                  <table className="table">
+                  <table className="table" ref={tableRef}>
                     <thead>
                       <tr>
                         <th>Symbol</th>
@@ -1103,20 +986,22 @@ export default function App() {
                         <th>Funding</th>
                         <th>Trading Fees</th>
                         <th>Insurance</th>
-                        <th style={{ width: 220 }}>Actions</th>
+                        <th className="sticky actions">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {symbolBlocks.map((b) => (
-                        <tr key={b.symbol}>
+                        <tr key={b.symbol} id={`row-${b.symbol}`}>
                           <td className="label">{b.symbol}</td>
-                          <td><AssetPairsCell map={b.realizedByAsset} /></td>
-                          <td><AssetPairsCell map={b.fundingByAsset} /></td>
-                          <td><AssetPairsCell map={b.commByAsset} /></td>
-                          <td><AssetPairsCell map={b.insByAsset} /></td>
-                          <td className="actions">
-                            <button className="btn btn-small" onClick={() => copyOneSymbolText(b)}>Copy</button>
-                            <button className="btn btn-small" onClick={() => saveOneSymbolPNG(b)}>Save PNG</button>
+                          <td className="num">{renderAssetPairs(b.realizedByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.fundingByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.commByAsset)}</td>
+                          <td className="num">{renderAssetPairs(b.insByAsset)}</td>
+                          <td className="sticky actions">
+                            <div className="btn-row">
+                              <button className="btn btn-small" onClick={() => copyOneSymbol(b)}>Copy details</button>
+                              <button className="btn btn-small" onClick={() => saveOneSymbolPng(b.symbol)}>Save PNG</button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1126,12 +1011,6 @@ export default function App() {
               ) : (
                 <p className="muted">No symbol activity.</p>
               )}
-            </div>
-
-            {/* Other Types (non-event) shown inline */}
-            <div className="subcard">
-              <h3>Other Types (non-event)</h3>
-              {otherTypesNonEvent.length ? <OtherTypesBlock rows={otherTypesNonEvent} /> : <p className="muted">None</p>}
             </div>
           </div>
         </section>
@@ -1143,31 +1022,41 @@ export default function App() {
           <div className="card">
             <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Coin Swaps & Auto-Exchange (UTC+0)</h2>
+              <div className="btn-row">
+                <button className="btn" onClick={() => copySwaps(swapAuto, "Auto-Exchange")}>Copy Auto-Exchange</button>
+                <button className="btn" onClick={() => copySwaps(swapCoin, "Coin Swaps")}>Copy Coin Swaps</button>
+              </div>
             </div>
 
-            <div className="subcard">
-              <div className="card-head">
-                <h3>Coin Swaps (grouped by second)</h3>
-                <button className="btn" onClick={copyCoinSwaps}>Copy Coin Swaps</button>
+            <div className="grid two">
+              <div>
+                <h4 className="muted">Auto-Exchange</h4>
+                {swapAuto.length ? (
+                  <ul className="list">
+                    {swapAuto.map((s, i) => (
+                      <li key={i} className="num">{s.text}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">None</p>
+                )}
               </div>
-              {coinSwaps.length ? (
-                <ul className="list">{coinSwaps.map((s, i) => <li key={`cs-${i}`} className="num">{s.text}</li>)}</ul>
-              ) : (
-                <p className="muted">None</p>
-              )}
+
+              <div>
+                <h4 className="muted">Coin Swaps</h4>
+                {swapCoin.length ? (
+                  <ul className="list">
+                    {swapCoin.map((s, i) => (
+                      <li key={i} className="num">{s.text}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">None</p>
+                )}
+              </div>
             </div>
 
-            <div className="subcard">
-              <div className="card-head">
-                <h3>Auto-Exchange (grouped by second)</h3>
-                <button className="btn" onClick={copyAutoExchange}>Copy Auto-Exchange</button>
-              </div>
-              {autoEx.length ? (
-                <ul className="list">{autoEx.map((s, i) => <li key={`ax-${i}`} className="num">{s.text}</li>)}</ul>
-              ) : (
-                <p className="muted">None</p>
-              )}
-            </div>
+            <p className="hint">Each line groups all legs that happened at the same second (UTC+0).</p>
           </div>
         </section>
       )}
@@ -1178,7 +1067,9 @@ export default function App() {
           <div className="card">
             <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Event Contracts (separate product)</h2>
-              <button className="btn" onClick={copyEvents}>Copy Events</button>
+              <button className="btn" onClick={copyEvents}>
+                Copy Events
+              </button>
             </div>
             <EventSummary rows={events} />
             <div className="subcard">
@@ -1196,8 +1087,12 @@ export default function App() {
             <div className="card-head" style={{ justifyContent: "space-between" }}>
               <h2>Raw Parsed Table (Excel-like)</h2>
               <div className="btn-row">
-                <button className="btn" onClick={copyRaw}>Copy Table (TSV)</button>
-                <button className="btn" onClick={() => downloadCsv("balance_log.csv", rows)}>Download CSV</button>
+                <button className="btn" onClick={copyRaw}>
+                  Copy TSV
+                </button>
+                <button className="btn" onClick={() => downloadCsvFile("balance_log.csv", rows)}>
+                  Download CSV
+                </button>
               </div>
             </div>
             <div className="tablewrap">
@@ -1215,7 +1110,7 @@ export default function App() {
                       <td>{r.time}</td>
                       <td>{r.type}</td>
                       <td>{r.asset}</td>
-                      <td className={`num ${r.amount >= 0 ? "pos" : "neg"}`}>{fmtSigned(r.amount)}</td>
+                      <td className="num">{fmtSigned(r.amount)}</td>
                       <td>{r.symbol}</td>
                       <td>{r.id}</td>
                       <td>{r.uid}</td>
@@ -1228,36 +1123,11 @@ export default function App() {
           </div>
         </section>
       )}
-
-      {/* Full Response Preview Modal */}
-      {showFullPreview && (
-        <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
-          <div className="modal">
-            <div className="modal-head">
-              <h3>Copy Response (Full) — Preview & Edit</h3>
-              <button className="btn" onClick={() => setShowFullPreview(false)}>Close</button>
-            </div>
-            <textarea
-              className="modal-text"
-              value={fullPreviewText}
-              onChange={(e) => setFullPreviewText(e.target.value)}
-            />
-            <div className="btn-row" style={{ marginTop: 8 }}>
-              <button className="btn btn-success" onClick={() => sectionCopy(fullPreviewText)}>Copy Edited Text</button>
-              <button className="btn" onClick={() => setFullPreviewText(buildFullResponse())}>Reset to Auto Text</button>
-            </div>
-            <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) applies in the auto text.</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-/* ===========================
-   Components
-=========================== */
-
+/* ---------- small components ---------- */
 function EventSummary({ rows }: { rows: Row[] }) {
   const orders = rows.filter((r) => r.type === "EVENT_CONTRACTS_ORDER");
   const payouts = rows.filter((r) => r.type === "EVENT_CONTRACTS_PAYOUT");
@@ -1286,9 +1156,9 @@ function EventSummary({ rows }: { rows: Row[] }) {
             return (
               <tr key={asset}>
                 <td className="label">{asset}</td>
-                <td className="num pos">+{fmtAbs(p.pos)}</td>
-                <td className="num neg">−{fmtAbs(o.neg)}</td>
-                <td className={`num ${net >= 0 ? "pos" : "neg"}`}>{fmtSigned(net)}</td>
+                <td className="num good">+{fmtAbs(p.pos)}</td>
+                <td className="num bad">−{fmtAbs(o.neg)}</td>
+                <td className={`num ${net >= 0 ? "good" : "bad"}`}>{fmtSigned(net)}</td>
               </tr>
             );
           })}
@@ -1313,7 +1183,7 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
         const byAsset = sumByAsset(byType.get(t) || []);
         const ks = Object.keys(byAsset);
         return (
-          <div key={t} className="card tone">
+          <div key={t} className="typecard">
             <div className="card-head">
               <h4>{t}</h4>
             </div>
@@ -1324,9 +1194,9 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
                   return (
                     <li key={asset} className="kv-row">
                       <span className="label">{asset}</span>
-                      <span className="num pos">+{fmtAbs(v.pos)}</span>
-                      <span className="num neg">−{fmtAbs(v.neg)}</span>
-                      <span className={`num ${v.net >= 0 ? "pos" : "neg"}`}>{fmtSigned(v.net)}</span>
+                      <span className="num good">+{fmtAbs(v.pos)}</span>
+                      <span className="num bad">−{fmtAbs(v.neg)}</span>
+                      <span className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
                     </li>
                   );
                 })}
@@ -1341,84 +1211,17 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
   );
 }
 
-/* ===========================
-   CSS (embedded, light theme)
-=========================== */
-
+/* ---------- CSS (embedded) ---------- */
 const css = `
 :root{
-  --bg:#f6f7fb; --txt:#0f1720; --muted:#6b7785; --card:#ffffff; --line:#e6e9ee;
-  --primary:#0f62fe; --dark:#111827; --success:#16a34a; --danger:#dc2626; --pill:#f7f8fa;
+  --bg:#f7f9fc; --txt:#0f1720; --muted:#64748b; --card:#ffffff; --line:#e6e9ee;
+  --primary:#0f62fe; --dark:#0f172a; --success:#10b981; --danger:#ef4444; --pill:#f7f8fa;
 }
-*{box-sizing:border-box}
-body{margin:0}
-.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.42 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
-.header{max-width:1080px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between;flex-wrap:wrap}
-.header h1{margin:0;font-size:26px}
+*{box-sizing:border-box} body{margin:0}
+.wrap{min-height:100vh;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+.header{max-width:1080px;margin:24px auto 12px;padding:0 16px;display:flex;gap:12px;align-items:flex-end;justify-content:space-between}
+.header h1{margin:0 0 2px;font-size:26px}
 .muted{color:var(--muted)}
-.btn-row{display:flex;gap:8px;flex-wrap:wrap}
-.btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
-.btn:hover{background:#f9fafb}
-.btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
-.btn-dark{background:var(--dark);border-color:var(--dark);color:#fff}
-.btn-success{background:var(--success);border-color:var(--success);color:#fff}
-.btn-small{padding:6px 10px}
-
-.space{max-width:1080px;margin:0 auto;padding:0 16px 24px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px auto}
-.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap}
-.subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
-.grid{display:grid;gap:12px}
-.grid.two{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
-.grid.three{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-.pill{background:var(--pill);border:1px solid var(--line);border-radius:12px;padding:10px}
-.kv{display:grid;gap:8px}
-.kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
-.label{font-weight:600}
-.num{font-variant-numeric:tabular-nums}
-.pos{color:var(--success);font-weight:700}
-.neg{color:var(--danger);font-weight:700}
-.tone{background:#fcfdfd}
-.tone-pos{background:#f1fdf5}
-.tone-neg{background:#fff3f3}
-
-.pairs{display:flex;flex-wrap:wrap;gap:6px}
-.pair{display:flex;gap:6px;align-items:center}
-.pair .asset{font-weight:600;color:#111}
-.sep{opacity:.6}
-
-.paste{width:100%;height:120px;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;background:#fff}
-.error{color:#b91c1c;margin:8px 0 0}
-.diags summary{cursor:pointer;font-weight:600}
-.diagbox{width:100%;height:120px;background:#fbfcfe;border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
-
-.tabs{max-width:1080px;margin:6px auto 0;padding:0 16px;display:flex;gap:8px;flex-wrap:wrap}
-.tab{border:1px solid var(--line);background:#fff;padding:8px 12px;border-radius:999px;cursor:pointer}
-.tab.active{background:var(--dark);border-color:var(--dark);color:#fff}
-
-.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
-.table{width:100%;border-collapse:separate;border-spacing:0}
-.table th,.table td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.table thead th{background:#fbfcfe;font-weight:700;position:sticky;top:0}
-.table .label{font-weight:600}
-.table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
-.table.small td,.table.small th{padding:8px 10px}
-.actions{white-space:nowrap;display:flex;gap:6px;flex-wrap:wrap}
-
-.list{margin:0;padding:0 0 0 18px}
-.hint{margin-top:8px;font-size:12px;color:var(--muted)}
-
-/* Paste box (Excel-like) */
-.dropzone{
-  width:100%;min-height:64px;border:2px dashed var(--line);border-radius:12px;background:#fff;
-  padding:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);
-  text-align:center; user-select:none; outline:none;
-}
-.dropzone:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,98,254,0.15)}
-
-/* Modal overlay */
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:1000}
-.modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
-.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
-.modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
-`;
+.good{color:#059669}
+.bad{color:#dc2626}
+.btn-row{display:flex;gap:8px;flex-wrap:
