@@ -1,5 +1,3 @@
-Here’s the **full updated** `src/App.tsx` implementing the fixes we agreed, plus correcting the USDT/BFUSD/USDC residues by:
-
 * parsing/normalizing times as true **UTC** timestamps (no string-compare bugs),
 * using **one single delta map** for both the narrative bullets and the final Expected\@T1 (including **Other Types**),
 * always listing **Event Contracts** (Payouts/Orders/Net) while honoring the “include in math” toggle,
