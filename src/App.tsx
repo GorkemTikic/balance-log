@@ -2036,10 +2036,10 @@ const css = `
 
 /* Responsive stacking */
 @media (max-width: 980px){
-.asset-tiles{grid-template-columns:1fr}
-.dual{grid-template-columns:1fr}
-.splitter{display:none}
-.right{position:relative;top:auto;max-height:none}
-.right-scroll{max-height:none}
+  .asset-tiles{grid-template-columns:1fr}
+  .dual{grid-template-columns:1fr}
+  .splitter{display:none}
+  .right{position:relative;top:auto;max-height:none}
+  .right-scroll{max-height:none}
 }
 `;
