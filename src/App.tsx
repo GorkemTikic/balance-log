@@ -1,9 +1,10 @@
+// src/App.tsx
 import React, { useMemo, useState, useRef, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
- * Balance Story tool (sticky KPI header, right block) with robust UTC filtering and single-source-of-truth deltas
+ * Balance Story tool with robust UTC filtering and single-source-of-truth deltas
  */
 
 type Row = {
@@ -95,7 +96,8 @@ const gt = (x: number) => abs(x) > EPS;
 function fmtAbs(x: number, maxDp = 12) {
   const v = abs(x);
   const s = v.toString().includes("e") ? v.toFixed(12) : v.toString();
-  return s.replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
+  // Keep as many decimals as JS preserves; do not clamp or round further.
+  return s;
 }
 function fmtSigned(x: number, maxDp = 12) {
   const n = Number(x) || 0;
@@ -625,6 +627,18 @@ const mapToPrettyList = (m: Record<string, number>) => {
   return ks.sort().map((a) => `${fmtAbs(m[a])} ${a}`).join(", ");
 };
 
+// Allow TSV pasting like "USDT<TAB>300"
+function pasteToRows(pasted: string): BalanceRow[] {
+  const out: BalanceRow[] = [];
+  pasted.split(/\r?\n/).forEach((line) => {
+    const [a, val] = line.split(/\t|,|\s{2,}/);
+    if (!a || !val) return;
+    if (!ALL_ASSETS.includes(a as AssetCode)) return;
+    out.push({ asset: a as AssetCode, amount: val.trim() });
+  });
+  return out.length ? out : [emptyRow()];
+}
+
 function filterRowsInRangeUTC(rows: Row[], start?: string, end?: string, exclusiveStart = false) {
   const s = start ? parseUtcMs(normalizeTimeString(start)) : Number.NEGATIVE_INFINITY;
   const e = end ? parseUtcMs(normalizeTimeString(end)) : Number.POSITIVE_INFINITY;
@@ -739,7 +753,7 @@ export default function App() {
       const x = e.clientX - rect.left;
       const cw = rect.width;
       const newRightPct = ((cw - x) / cw) * 100;
-      const minPct = (420 / cw) * 100; // keep better default usability
+      const minPct = (420 / cw) * 100; // raised min width
       const clamped = Math.min(60, Math.max(minPct, newRightPct));
       setRightPct(clamped);
     }
@@ -1326,18 +1340,6 @@ export default function App() {
     setStoryPreviewOpen(true);
   }
 
-  // helpers for TSV paste
-  function pasteToRows(pasted: string): BalanceRow[] {
-    const out: BalanceRow[] = [];
-    pasted.split(/\r?\n/).forEach((line) => {
-      const [a, val] = line.split(/\t|,|\s{2,}/);
-      if (!a || !val) return;
-      if (!ALL_ASSETS.includes(a as AssetCode)) return;
-      out.push({ asset: a as AssetCode, amount: val.trim() });
-    });
-    return out.length ? out : [emptyRow()];
-  }
-
   return (
     <div className="wrap">
       <style>{css}</style>
@@ -1392,7 +1394,7 @@ export default function App() {
         <section className="space">
           {/* KPI HEADER */}
           <div className="kpi sticky card">
-            {/* Asset tiles row */}
+            {/* Asset tiles row (USDT/USDC/BNFCR Realized PnL only) */}
             <div className="kpi-row asset-tiles">
               {["USDT", "USDC", "BNFCR"].map((a) => {
                 const v = realizedByAsset[a] || { pos: 0, neg: 0, net: 0 };
@@ -1943,6 +1945,7 @@ const css = `
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap}
 .subcard{border:1px dashed var(--line);padding:10px;border-radius:10px;background:#fcfdfd}
 .grid{display:grid;gap:12px;align-items:start}
+.grid.two{grid-template-columns:repeat(2,minmax(340px,1fr))}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
 .kv{display:grid;gap:8px}
 .kv-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:var(--pill);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
