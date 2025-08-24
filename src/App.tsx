@@ -1,10 +1,18 @@
+Here’s the **full updated** `src/App.tsx` implementing the fixes we agreed, plus correcting the USDT/BFUSD/USDC residues by:
+
+* parsing/normalizing times as true **UTC** timestamps (no string-compare bugs),
+* using **one single delta map** for both the narrative bullets and the final Expected\@T1 (including **Other Types**),
+* always listing **Event Contracts** (Payouts/Orders/Net) while honoring the “include in math” toggle,
+* adding an explicit **reconciliation** line per anchored asset: `T0 AFTER + Net Change = Expected @T1`.
+
+```tsx
 // src/App.tsx
 import React, { useMemo, useState, useRef, useEffect } from "react";
 
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
- * Adds: Balance Story tool (sticky KPI header, right block)
+ * Balance Story tool (sticky KPI header, right block) with robust UTC filtering and single-source-of-truth deltas
  */
 
 type Row = {
@@ -13,7 +21,8 @@ type Row = {
   asset: string;
   type: string;
   amount: number;
-  time: string; // UTC+0, "YYYY-MM-DD HH:MM:SS"
+  time: string; // canonical "YYYY-MM-DD HH:MM:SS" UTC+0 (hour zero-padded)
+  ts: number;   // UTC epoch milliseconds
   symbol: string;
   extra: string;
   raw: string;
@@ -62,12 +71,37 @@ const SPLIT_W = 12; // splitter width (px)
 const ALL_ASSETS = ["BTC","LDUSDT","BFUSD","FDUSD","BNB","ETH","USDT","USDC","BNFCR"] as const;
 type AssetCode = typeof ALL_ASSETS[number];
 
-/* ---------- utils ---------- */
+/* ---------- time utils (true UTC) ---------- */
+function normalizeTimeString(s: string): string {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})$/);
+  if (!m) return s;
+  const [, y, mo, d, h, mi, se] = m;
+  const hh = h.padStart(2, "0");
+  return `${y}-${mo}-${d} ${hh}:${mi}:${se}`;
+}
+function parseUtcMs(s: string): number {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})$/);
+  if (!m) return NaN;
+  const [, Y, Mo, D, H, Mi, S] = m;
+  return Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S);
+}
+function tsToUtcString(millis: number): string {
+  const d = new Date(millis);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const Y = d.getUTCFullYear();
+  const M = pad(d.getUTCMonth() + 1);
+  const D = pad(d.getUTCDate());
+  const H = pad(d.getUTCHours());
+  const I = pad(d.getUTCMinutes());
+  const S = pad(d.getUTCSeconds());
+  return `${Y}-${M}-${D} ${H}:${I}:${S}`;
+}
+
+/* ---------- general utils ---------- */
 const abs = (x: number) => Math.abs(Number(x) || 0);
 const gt = (x: number) => abs(x) > EPS;
 
 function fmtAbs(x: number, maxDp = 12) {
-  // keep full precision visually (no rounding), but trim trailing zeros
   const v = abs(x);
   const s = v.toString().includes("e") ? v.toFixed(12) : v.toString();
   return s.replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
@@ -106,7 +140,6 @@ function friendlyTypeName(t: string) {
   };
   return map[t] || titleCaseWords(t);
 }
-const timeCmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /* ---------- parsing ---------- */
 function splitColumns(line: string) {
@@ -157,13 +190,17 @@ function parseBalanceLog(text: string) {
     let symbol = "";
     if (symbolCandidate && SYMBOL_RE.test(symbolCandidate)) symbol = symbolCandidate;
 
+    const normalized = normalizeTimeString(timeCol.match(DATE_RE)?.[1] || when);
+    const ts = parseUtcMs(normalized);
+
     rows.push({
       id,
       uid,
       asset,
       type,
       amount,
-      time: timeCol.match(DATE_RE)?.[1] || when,
+      time: normalized,
+      ts,
       symbol,
       extra,
       raw: line,
@@ -248,15 +285,17 @@ function groupSwaps(rows: Row[], kind: SwapKind) {
   const map = new Map<string, Row[]>();
   for (const r of filtered) {
     const idHint = (r.extra && r.extra.split("@")[0]) || "";
+    // group by normalized time string + id-hint (per second)
     const key = `${r.time}|${idHint}`;
     const g = map.get(key) || [];
     g.push(r);
     map.set(key, g);
   }
 
-  const lines: { time: string; text: string }[] = [];
+  const lines: { time: string; ts: number; text: string }[] = [];
   for (const [, group] of map.entries()) {
     const t = group[0].time;
+    const ts = group[0].ts;
     const byAsset = new Map<string, number>();
     for (const g of group) byAsset.set(g.asset, (byAsset.get(g.asset) || 0) + g.amount);
 
@@ -268,10 +307,11 @@ function groupSwaps(rows: Row[], kind: SwapKind) {
     }
     lines.push({
       time: t,
+      ts,
       text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}`,
     });
   }
-  lines.sort((a, b) => timeCmp(a.time, b.time));
+  lines.sort((a, b) => a.ts - b.ts);
   return lines;
 }
 
@@ -594,31 +634,29 @@ const mapToPrettyList = (m: Record<string, number>) => {
   return ks.sort().map((a) => `${fmtAbs(m[a])} ${a}`).join(", ");
 };
 
-function filterRowsInRange(rows: Row[], start?: string, end?: string, exclusiveStart = false) {
+function filterRowsInRangeUTC(rows: Row[], start?: string, end?: string, exclusiveStart = false) {
+  const s = start ? parseUtcMs(normalizeTimeString(start)) : Number.NEGATIVE_INFINITY;
+  const e = end ? parseUtcMs(normalizeTimeString(end)) : Number.POSITIVE_INFINITY;
   return rows.filter((r) => {
-    if (start) {
-      const cmp = timeCmp(r.time, start);
-      if (exclusiveStart ? !(cmp > 0) : !(cmp >= 0)) return false;
-    }
-    if (end && !(timeCmp(r.time, end) <= 0)) return false;
+    if (exclusiveStart ? !(r.ts > s) : !(r.ts >= s)) return false;
+    if (!(r.ts <= e)) return false;
     return true;
   });
 }
 
 function sumByTypeAndAsset(rows: Row[]) {
-  const bucket = <T extends {}>() => ({});
   const out = {
-    realized: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    funding: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    commission: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    insurance: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    referral: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    transferGen: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    gridbot: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    coinSwap: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    autoEx: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    eventOrders: bucket() as Record<string, { pos: number; neg: number; net: number }>,
-    eventPayouts: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    realized: {} as Record<string, { pos: number; neg: number; net: number }>,
+    funding: {} as Record<string, { pos: number; neg: number; net: number }>,
+    commission: {} as Record<string, { pos: number; neg: number; net: number }>,
+    insurance: {} as Record<string, { pos: number; neg: number; net: number }>,
+    referral: {} as Record<string, { pos: number; neg: number; net: number }>,
+    transferGen: {} as Record<string, { pos: number; neg: number; net: number }>,
+    gridbot: {} as Record<string, { pos: number; neg: number; net: number }>,
+    coinSwap: {} as Record<string, { pos: number; neg: number; net: number }>,
+    autoEx: {} as Record<string, { pos: number; neg: number; net: number }>,
+    eventOrders: {} as Record<string, { pos: number; neg: number; net: number }>,
+    eventPayouts: {} as Record<string, { pos: number; neg: number; net: number }>,
     otherNonEvent: {} as Record<string, Record<string, { pos: number; neg: number; net: number }>>,
   };
 
@@ -656,7 +694,10 @@ function sumByTypeAndAsset(rows: Row[]) {
 }
 
 function addMaps(a: Record<string, number>, b: Record<string, { net: number }>) {
-  Object.entries(b).forEach(([asset, v]) => (a[asset] = (a[asset] || 0) + (v.net || 0)));
+  Object.entries(b).forEach(([asset, v]) => (a[asset] = (a[asset] || 0) + (v?.net || 0)));
+}
+function addNestedMaps(a: Record<string, number>, nested: Record<string, Record<string, { net: number }>>) {
+  Object.values(nested).forEach((perAsset) => addMaps(a, perAsset));
 }
 
 /* ---------- main app ---------- */
@@ -759,14 +800,8 @@ export default function App() {
   const gridbotByAsset = useMemo(() => sumByAsset(gridbotTransfers), [gridbotTransfers]);
 
   // Events & KPIs
-  const eventsOrderByAsset = useMemo(
-    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER)),
-    [events]
-  );
-  const eventsPayoutByAsset = useMemo(
-    () => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT)),
-    [events]
-  );
+  const eventsOrderByAsset = useMemo(() => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_ORDER)), [events]);
+  const eventsPayoutByAsset = useMemo(() => sumByAsset(events.filter((r) => r.type === TYPE.EVENT_PAYOUT)), [events]);
 
   const coinSwapAggByAsset = useMemo(
     () => sumByAsset(parsed.filter((r) => r.type === TYPE.COIN_SWAP_DEPOSIT || r.type === TYPE.COIN_SWAP_WITHDRAW)),
@@ -784,8 +819,11 @@ export default function App() {
     return allSymbolBlocks.filter((b) => b.symbol === symbolFilter);
   }, [allSymbolBlocks, symbolFilter]);
 
-  const minTime = useMemo(() => (rows.length ? rows.reduce((a, r) => (timeCmp(r.time, a) < 0 ? r.time : a), rows[0].time) : ""), [rows]);
-  const maxTime = useMemo(() => (rows.length ? rows.reduce((a, r) => (timeCmp(r.time, a) > 0 ? r.time : a), rows[0].time) : ""), [rows]);
+  // Boundaries (true UTC)
+  const minTs = useMemo(() => (rows.length ? Math.min(...rows.map((r) => r.ts)) : NaN), [rows]);
+  const maxTs = useMemo(() => (rows.length ? Math.max(...rows.map((r) => r.ts)) : NaN), [rows]);
+  const minTime = Number.isFinite(minTs) ? tsToUtcString(minTs) : "";
+  const maxTime = Number.isFinite(maxTs) ? tsToUtcString(maxTs) : "";
 
   function runParse(tsv: string) {
     setError("");
@@ -1115,8 +1153,10 @@ export default function App() {
     let T0 = storyT0 || minTime || "";
     let T1 = storyT1 || maxTime || "";
     if (!T0) return "Please provide a start time (UTC+0).";
+    T0 = normalizeTimeString(T0);
+    if (T1) T1 = normalizeTimeString(T1);
 
-    // Mode A: exclude the anchor second (since BEFORE→AFTER happens at T0)
+    // Mode A/B: exclude the anchor second (since BEFORE→AFTER happens exactly at T0)
     const exclusiveStart = storyMode === "A" || (storyMode === "B");
 
     // Anchor balances
@@ -1130,34 +1170,34 @@ export default function App() {
       anchorAfter[transferAsset] = (anchorAfter[transferAsset] || 0) + amt;
     } else if (storyMode === "B") {
       anchorAfter = parseBalanceRowsToMap(afterRows);
-      // If transfer provided in mode B, show inferred BEFORE
+      // If transfer provided in mode B, infer BEFORE
       if (transferAmount.trim()) {
         const amt = Number(transferAmount) || 0;
         anchorBefore = { ...anchorAfter };
         anchorBefore[transferAsset] = (anchorBefore[transferAsset] || 0) - amt;
       }
     } else if (storyMode === "C") {
-      // Between dates; optional From balances
-      anchorAfter = undefined; // not used
+      anchorAfter = undefined; // not used for calc
       anchorBefore = parseBalanceRowsToMap(fromRows);
       if (!storyT1) T1 = maxTime;
       if (!storyT0) T0 = minTime;
     }
 
-    // Filter window rows
-    const windowRows = filterRowsInRange(rows, T0, T1, exclusiveStart);
+    // Filter window rows (robust UTC compare)
+    const windowRows = filterRowsInRangeUTC(rows, T0, T1, exclusiveStart);
 
-    // Split events if needed
+    // Split events if needed for math
     const rowsForMath = windowRows.filter((r) => {
       if (!includeGridbot && r.type === TYPE.GRIDBOT_TRANSFER) return false;
       if (!includeEvents && r.type.startsWith(EVENT_PREFIX)) return false;
       return true;
     });
 
-    // Aggregate categories and total deltas
-    const catsAll = sumByTypeAndAsset(windowRows);
+    // Single-source aggregation for display and for math
+    const catsDisplay = sumByTypeAndAsset(windowRows);
     const catsMath = sumByTypeAndAsset(rowsForMath);
 
+    // Unified delta map (includes Other Types)
     const deltaByAsset: Record<string, number> = {};
     addMaps(deltaByAsset, catsMath.realized);
     addMaps(deltaByAsset, catsMath.funding);
@@ -1172,6 +1212,7 @@ export default function App() {
       addMaps(deltaByAsset, catsMath.eventPayouts);
       addMaps(deltaByAsset, catsMath.eventOrders);
     }
+    addNestedMaps(deltaByAsset, catsMath.otherNonEvent); // include Other Types in delta
 
     // Expected balances at T1
     let expectedAtEnd: Record<string, number> | undefined;
@@ -1233,38 +1274,53 @@ export default function App() {
       });
     };
 
-    section("Realized PnL", catsAll.realized);
-    section("Trading Fees / Commission", catsAll.commission);
-    section("Referral Kickback", catsAll.referral);
-    section("Funding Fees", catsAll.funding);
-    section("Insurance / Liquidation", catsAll.insurance);
-    section("Transfers (General)", catsAll.transferGen, { showNet: true });
-    if (includeGridbot) section("Futures GridBot Wallet transfers", catsAll.gridbot, { showNet: true });
-    section("Coin Swaps", catsAll.coinSwap, { showNet: true });
-    section("Auto-Exchange", catsAll.autoEx, { showNet: true });
+    section("Realized PnL", catsDisplay.realized);
+    section("Trading Fees / Commission", catsDisplay.commission);
+    section("Referral Kickback", catsDisplay.referral);
+    section("Funding Fees", catsDisplay.funding);
+    section("Insurance / Liquidation", catsDisplay.insurance);
+    section("Transfers (General)", catsDisplay.transferGen, { showNet: true });
+    if (includeGridbot) section("Futures GridBot Wallet transfers", catsDisplay.gridbot, { showNet: true });
+    section("Coin Swaps", catsDisplay.coinSwap, { showNet: true });
+    section("Auto-Exchange", catsDisplay.autoEx, { showNet: true });
 
-    if (!includeEvents) {
-      section("Event Contracts — Payouts", catsAll.eventPayouts);
-      section("Event Contracts — Orders", catsAll.eventOrders);
-    } else {
-      L.push("- Event Contracts were included in the balance math for this window.");
-    }
+    // Event Contracts always listed; note inclusion status
+    const eventNote = includeEvents
+      ? " (included in balance math)"
+      : " (not included in balance math)";
+    section(`Event Contracts — Payouts${eventNote}`, catsDisplay.eventPayouts);
+    section(`Event Contracts — Orders${eventNote}`, catsDisplay.eventOrders);
 
     // Other non-event types
-    const otherKeys = Object.keys(catsAll.otherNonEvent).sort();
+    const otherKeys = Object.keys(catsDisplay.otherNonEvent).sort();
     otherKeys.forEach((t) => {
-      section(`Other — ${friendlyTypeName(t)}`, catsAll.otherNonEvent[t], { showNet: true });
+      section(`Other — ${friendlyTypeName(t)}`, catsDisplay.otherNonEvent[t], { showNet: true });
     });
 
     L.push("");
 
     if (expectedAtEnd) {
-      L.push(`${T1 || maxTime} (UTC+0) — Expected wallet balances based on this activity:`);
+      const endLabel = T1 || maxTime;
+      L.push(`${endLabel} (UTC+0) — Expected wallet balances based on this activity:`);
       const ks = Object.keys(expectedAtEnd).filter((k) => gt(expectedAtEnd![k]));
       if (ks.length) {
         L.push("  " + ks.sort().map((a) => `${fmtAbs(expectedAtEnd![a])} ${a}`).join(", "));
       } else {
         L.push("  —");
+      }
+
+      // Reconciliation line (per anchored asset)
+      const anchor = (storyMode === "A" || storyMode === "B") ? (anchorAfter || {}) : (anchorBefore || {});
+      const assets = Array.from(new Set([...Object.keys(anchor), ...Object.keys(deltaByAsset)])).sort();
+      if (assets.length) {
+        L.push("");
+        L.push("Reconciliation (per asset):");
+        assets.forEach((a) => {
+          const start = anchor[a] || 0;
+          const d = deltaByAsset[a] || 0;
+          const exp = (expectedAtEnd![a] || 0);
+          L.push(`  ${a}: T0 ${fmtAbs(start)} + Net ${fmtSigned(d)} = ${fmtAbs(exp)}`);
+        });
       }
     } else if (storyMode === "C" && !Object.keys(anchorBefore || {}).length) {
       L.push("Note: No starting balances were provided for the window, so this story lists activity but does not compute expected balances at the end.");
@@ -1343,7 +1399,7 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          {/* KPI HEADER (row 1: USDT/USDC/BNFCR tiles; row 2: KPIs + actions + Balance Story) */}
+          {/* KPI HEADER */}
           <div className="kpi sticky card">
             {/* Asset tiles row */}
             <div className="kpi-row asset-tiles">
@@ -1559,7 +1615,11 @@ export default function App() {
               <div className="btn-row">
                 <button className="btn" onClick={copyRaw}>Copy TSV</button>
                 <button className="btn" onClick={() => {
-                  const blob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" });
+                  const headers = ["time","type","asset","amount","symbol","id","uid","extra"];
+                  const csv = toCsv(rows.map(r => ({
+                    time: r.time, type: r.type, asset: r.asset, amount: r.amount, symbol: r.symbol, id: r.id, uid: r.uid, extra: r.extra
+                  })));
+                  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
                   a.href = url; a.download = "balance_log.csv"; a.click();
@@ -1842,7 +1902,6 @@ function BalancesEditor({
             <summary className="btn">Paste TSV</summary>
             <div style={{marginTop:6}}>
               <textarea className="paste" placeholder="Asset[TAB]Amount per line" onPaste={(e)=>{
-                // let user paste anywhere inside; we read value after paste
                 setTimeout(()=>{
                   const ta = e.target as HTMLTextAreaElement;
                   const next = pasteToRows(ta.value);
@@ -1993,3 +2052,4 @@ const css = `
   .right-scroll{max-height:none}
 }
 `;
+```
