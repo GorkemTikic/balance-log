@@ -4,12 +4,7 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 /**
  * Balance Log Analyzer — light theme, UTC+0
  * Dual-pane Summary layout: LEFT analysis cards | SPLITTER | RIGHT By Symbol (resizable)
- * This revision updates ONLY the top Asset KPI tiles (USDT / USDC / BNFCR):
- *  - Line 1: asset label
- *  - Line 2: Net (large, color-coded)
- *  - Line 3: two chips — Received (green), Paid (red). If 0, shows a muted "—" chip for alignment
- *  - Fixed 3-column grid for visual consistency
- *  - No changes to decimals or math/precision anywhere
+ * Adds: Balance Story tool (sticky KPI header, right block)
  */
 
 type Row = {
@@ -18,7 +13,7 @@ type Row = {
   asset: string;
   type: string;
   amount: number;
-  time: string;
+  time: string; // UTC+0, "YYYY-MM-DD HH:MM:SS"
   symbol: string;
   extra: string;
   raw: string;
@@ -64,17 +59,20 @@ const KNOWN_TYPES = new Set<string>([
 
 const EPS = 1e-12;
 const SPLIT_W = 12; // splitter width (px)
+const ALL_ASSETS = ["BTC","LDUSDT","BFUSD","FDUSD","BNB","ETH","USDT","USDC","BNFCR"] as const;
+type AssetCode = typeof ALL_ASSETS[number];
 
 /* ---------- utils ---------- */
 const abs = (x: number) => Math.abs(Number(x) || 0);
 const gt = (x: number) => abs(x) > EPS;
 
-function fmtAbs(x: number, maxDp = 8) {
+function fmtAbs(x: number, maxDp = 12) {
+  // keep full precision visually (no rounding), but trim trailing zeros
   const v = abs(x);
-  const s = v.toFixed(maxDp);
+  const s = v.toString().includes("e") ? v.toFixed(12) : v.toString();
   return s.replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
 }
-function fmtSigned(x: number, maxDp = 8) {
+function fmtSigned(x: number, maxDp = 12) {
   const n = Number(x) || 0;
   const sign = n >= 0 ? "+" : "−";
   return `${sign}${fmtAbs(n, maxDp)}`;
@@ -90,8 +88,6 @@ function toCsv<T extends object>(rows: T[]) {
   const body = rows.map((r) => headers.map((h) => escape((r as any)[h])).join(","));
   return [headers.join(","), ...body].join("\n");
 }
-const sumMapMagnitude = (m: Record<string, { pos: number; neg: number }>) =>
-  Object.values(m).reduce((acc, v) => acc + abs(v.pos) + abs(v.neg), 0);
 
 function titleCaseWords(s: string) {
   if (!s) return s;
@@ -110,6 +106,7 @@ function friendlyTypeName(t: string) {
   };
   return map[t] || titleCaseWords(t);
 }
+const timeCmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /* ---------- parsing ---------- */
 function splitColumns(line: string) {
@@ -223,9 +220,9 @@ function bySymbolSummary(nonEventRows: Row[]) {
     const insByAsset = sumByAsset(ins);
 
     const coreMagnitude =
-      sumMapMagnitude(realizedByAsset) +
-      sumMapMagnitude(fundingByAsset) +
-      sumMapMagnitude(commByAsset);
+      Object.values(realizedByAsset).reduce((a, v) => a + abs(v.pos) + abs(v.neg), 0) +
+      Object.values(fundingByAsset).reduce((a, v) => a + abs(v.pos) + abs(v.neg), 0) +
+      Object.values(commByAsset).reduce((a, v) => a + abs(v.pos) + abs(v.neg), 0);
     if (coreMagnitude <= EPS) continue;
 
     out.push({
@@ -274,7 +271,7 @@ function groupSwaps(rows: Row[], kind: SwapKind) {
       text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}`,
     });
   }
-  lines.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+  lines.sort((a, b) => timeCmp(a.time, b.time));
   return lines;
 }
 
@@ -578,6 +575,90 @@ function drawSingleRowCanvas(block: SymbolBlock) {
   drawSymbolsCanvas([block], `${block.symbol}.png`);
 }
 
+/* ---------- Balance Story helpers ---------- */
+type BalanceRow = { asset: AssetCode; amount: string }; // amount as string for exact paste
+const emptyRow = (): BalanceRow => ({ asset: "USDT", amount: "" });
+
+const parseBalanceRowsToMap = (rows: BalanceRow[]) => {
+  const m: Record<string, number> = {};
+  rows.forEach((r) => {
+    const n = Number(r.amount);
+    if (!Number.isFinite(n)) return;
+    m[r.asset] = (m[r.asset] || 0) + n;
+  });
+  return m;
+};
+const mapToPrettyList = (m: Record<string, number>) => {
+  const ks = Object.keys(m).filter((k) => gt(m[k]));
+  if (!ks.length) return "—";
+  return ks.sort().map((a) => `${fmtAbs(m[a])} ${a}`).join(", ");
+};
+
+function filterRowsInRange(rows: Row[], start?: string, end?: string, exclusiveStart = false) {
+  return rows.filter((r) => {
+    if (start) {
+      const cmp = timeCmp(r.time, start);
+      if (exclusiveStart ? !(cmp > 0) : !(cmp >= 0)) return false;
+    }
+    if (end && !(timeCmp(r.time, end) <= 0)) return false;
+    return true;
+  });
+}
+
+function sumByTypeAndAsset(rows: Row[]) {
+  const bucket = <T extends {}>() => ({});
+  const out = {
+    realized: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    funding: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    commission: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    insurance: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    referral: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    transferGen: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    gridbot: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    coinSwap: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    autoEx: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    eventOrders: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    eventPayouts: bucket() as Record<string, { pos: number; neg: number; net: number }>,
+    otherNonEvent: {} as Record<string, Record<string, { pos: number; neg: number; net: number }>>,
+  };
+
+  const push = (map: Record<string, { pos: number; neg: number; net: number }>, r: Row) => {
+    const v = (map[r.asset] = map[r.asset] || { pos: 0, neg: 0, net: 0 });
+    if (r.amount >= 0) v.pos += r.amount;
+    else v.neg += abs(r.amount);
+    v.net += r.amount;
+  };
+
+  rows.forEach((r) => {
+    switch (r.type) {
+      case TYPE.REALIZED_PNL: push(out.realized, r); break;
+      case TYPE.FUNDING_FEE: push(out.funding, r); break;
+      case TYPE.COMMISSION: push(out.commission, r); break;
+      case TYPE.INSURANCE_CLEAR:
+      case TYPE.LIQUIDATION_FEE: push(out.insurance, r); break;
+      case TYPE.REFERRAL_KICKBACK: push(out.referral, r); break;
+      case TYPE.TRANSFER: push(out.transferGen, r); break;
+      case TYPE.GRIDBOT_TRANSFER: push(out.gridbot, r); break;
+      case TYPE.COIN_SWAP_DEPOSIT:
+      case TYPE.COIN_SWAP_WITHDRAW: push(out.coinSwap, r); break;
+      case TYPE.AUTO_EXCHANGE: push(out.autoEx, r); break;
+      case TYPE.EVENT_ORDER: push(out.eventOrders, r); break;
+      case TYPE.EVENT_PAYOUT: push(out.eventPayouts, r); break;
+      default:
+        if (!r.type.startsWith(EVENT_PREFIX)) {
+          const m = (out.otherNonEvent[r.type] = out.otherNonEvent[r.type] || {});
+          push(m, r);
+        }
+    }
+  });
+
+  return out;
+}
+
+function addMaps(a: Record<string, number>, b: Record<string, { net: number }>) {
+  Object.entries(b).forEach(([asset, v]) => (a[asset] = (a[asset] || 0) + (v.net || 0)));
+}
+
 /* ---------- main app ---------- */
 export default function App() {
   const [input, setInput] = useState("");
@@ -590,6 +671,26 @@ export default function App() {
   const [fullPreviewText, setFullPreviewText] = useState("");
 
   const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
+
+  // Balance Story drawer state
+  const [storyOpen, setStoryOpen] = useState(false);
+  const [storyMode, setStoryMode] = useState<"A" | "B" | "C">(() => (localStorage.getItem("storyMode") as any) || "A");
+
+  const [storyT0, setStoryT0] = useState<string>(() => localStorage.getItem("storyT0") || "");
+  const [storyT1, setStoryT1] = useState<string>(() => localStorage.getItem("storyT1") || ""); // end or To
+
+  const [transferAsset, setTransferAsset] = useState<AssetCode>("USDT");
+  const [transferAmount, setTransferAmount] = useState<string>("");
+
+  const [beforeRows, setBeforeRows] = useState<BalanceRow[]>([emptyRow()]);
+  const [afterRows, setAfterRows] = useState<BalanceRow[]>([emptyRow()]);
+  const [fromRows, setFromRows] = useState<BalanceRow[]>([emptyRow()]);
+
+  const [includeEvents, setIncludeEvents] = useState<boolean>(() => localStorage.getItem("storyIncEvents") === "1" ? true : false);
+  const [includeGridbot, setIncludeGridbot] = useState<boolean>(() => localStorage.getItem("storyIncGridbot") !== "0");
+
+  const [storyPreviewOpen, setStoryPreviewOpen] = useState(false);
+  const [storyText, setStoryText] = useState("");
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rightPct, setRightPct] = useState<number>(() => {
@@ -682,6 +783,9 @@ export default function App() {
     if (symbolFilter === "ALL") return allSymbolBlocks;
     return allSymbolBlocks.filter((b) => b.symbol === symbolFilter);
   }, [allSymbolBlocks, symbolFilter]);
+
+  const minTime = useMemo(() => (rows.length ? rows.reduce((a, r) => (timeCmp(r.time, a) < 0 ? r.time : a), rows[0].time) : ""), [rows]);
+  const maxTime = useMemo(() => (rows.length ? rows.reduce((a, r) => (timeCmp(r.time, a) > 0 ? r.time : a), rows[0].time) : ""), [rows]);
 
   function runParse(tsv: string) {
     setError("");
@@ -849,17 +953,6 @@ export default function App() {
         L.push(`  Total Transfer To/From the Futures GridBot Wallet — ${asset}: −${fmtAbs(gb.neg)} / +${fmtAbs(gb.pos)}`);
       }
 
-      const otherLines: string[] = [];
-      for (const [t, m] of Object.entries(otherByType)) {
-        const v = m[asset];
-        if (!v) continue;
-        const parts: string[] = [];
-        if (gt(v.pos)) parts.push(`+${fmtAbs(v.pos)}`);
-        if (gt(v.neg)) parts.push(`−${fmtAbs(v.neg)}`);
-        if (parts.length) otherLines.push(`  ${friendlyTypeName(t)}: ${parts.join(" / ")} ${asset}`);
-      }
-      if (otherLines.length) L.push(...otherLines);
-
       const net = totalByAsset[asset] ?? 0;
       if (gt(net)) L.push(`  The Total Amount in ${asset} for all the transaction history is: ${fmtSigned(net)} ${asset}`);
       L.push("");
@@ -989,6 +1082,215 @@ export default function App() {
     }, 60);
   };
 
+  // persist some story settings
+  useEffect(() => { localStorage.setItem("storyMode", storyMode); }, [storyMode]);
+  useEffect(() => { localStorage.setItem("storyT0", storyT0); }, [storyT0]);
+  useEffect(() => { localStorage.setItem("storyT1", storyT1); }, [storyT1]);
+  useEffect(() => { localStorage.setItem("storyIncEvents", includeEvents ? "1" : "0"); }, [includeEvents]);
+  useEffect(() => { localStorage.setItem("storyIncGridbot", includeGridbot ? "1" : "0"); }, [includeGridbot]);
+
+  // Auto-compute AFTER in Mode A based on BEFORE + transfer
+  useEffect(() => {
+    if (storyMode !== "A") return;
+    const before = parseBalanceRowsToMap(beforeRows);
+    const aft = { ...before };
+    const amt = Number(transferAmount);
+    if (Number.isFinite(amt)) aft[transferAsset] = (aft[transferAsset] || 0) + amt;
+    // sync afterRows UI to the computed values (preserve ordering)
+    const list: BalanceRow[] = [];
+    const aset: AssetCode[] = [...ALL_ASSETS];
+    aset.forEach((a) => {
+      if (a in aft) list.push({ asset: a, amount: String(aft[a]) });
+    });
+    if (!list.length) list.push(emptyRow());
+    setAfterRows(list);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storyMode, beforeRows, transferAsset, transferAmount]);
+
+  /* ---------- Balance Story generator ---------- */
+  function buildBalanceStory(): string {
+    if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
+
+    // Figure time window
+    let T0 = storyT0 || minTime || "";
+    let T1 = storyT1 || maxTime || "";
+    if (!T0) return "Please provide a start time (UTC+0).";
+
+    // Mode A: exclude the anchor second (since BEFORE→AFTER happens at T0)
+    const exclusiveStart = storyMode === "A" || (storyMode === "B");
+
+    // Anchor balances
+    let anchorAfter: Record<string, number> | undefined;
+    let anchorBefore: Record<string, number> | undefined;
+
+    if (storyMode === "A") {
+      anchorBefore = parseBalanceRowsToMap(beforeRows);
+      const amt = Number(transferAmount) || 0;
+      anchorAfter = { ...anchorBefore };
+      anchorAfter[transferAsset] = (anchorAfter[transferAsset] || 0) + amt;
+    } else if (storyMode === "B") {
+      anchorAfter = parseBalanceRowsToMap(afterRows);
+      // If transfer provided in mode B, show inferred BEFORE
+      if (transferAmount.trim()) {
+        const amt = Number(transferAmount) || 0;
+        anchorBefore = { ...anchorAfter };
+        anchorBefore[transferAsset] = (anchorBefore[transferAsset] || 0) - amt;
+      }
+    } else if (storyMode === "C") {
+      // Between dates; optional From balances
+      anchorAfter = undefined; // not used
+      anchorBefore = parseBalanceRowsToMap(fromRows);
+      if (!storyT1) T1 = maxTime;
+      if (!storyT0) T0 = minTime;
+    }
+
+    // Filter window rows
+    const windowRows = filterRowsInRange(rows, T0, T1, exclusiveStart);
+
+    // Split events if needed
+    const rowsForMath = windowRows.filter((r) => {
+      if (!includeGridbot && r.type === TYPE.GRIDBOT_TRANSFER) return false;
+      if (!includeEvents && r.type.startsWith(EVENT_PREFIX)) return false;
+      return true;
+    });
+
+    // Aggregate categories and total deltas
+    const catsAll = sumByTypeAndAsset(windowRows);
+    const catsMath = sumByTypeAndAsset(rowsForMath);
+
+    const deltaByAsset: Record<string, number> = {};
+    addMaps(deltaByAsset, catsMath.realized);
+    addMaps(deltaByAsset, catsMath.funding);
+    addMaps(deltaByAsset, catsMath.commission);
+    addMaps(deltaByAsset, catsMath.insurance);
+    addMaps(deltaByAsset, catsMath.referral);
+    addMaps(deltaByAsset, catsMath.transferGen);
+    addMaps(deltaByAsset, catsMath.gridbot);
+    addMaps(deltaByAsset, catsMath.coinSwap);
+    addMaps(deltaByAsset, catsMath.autoEx);
+    if (includeEvents) {
+      addMaps(deltaByAsset, catsMath.eventPayouts);
+      addMaps(deltaByAsset, catsMath.eventOrders);
+    }
+
+    // Expected balances at T1
+    let expectedAtEnd: Record<string, number> | undefined;
+    if (storyMode === "A" || storyMode === "B") {
+      if (!anchorAfter) return "Please provide AFTER balances at the anchor time.";
+      expectedAtEnd = { ...anchorAfter };
+      Object.entries(deltaByAsset).forEach(([a, v]) => { expectedAtEnd![a] = (expectedAtEnd![a] || 0) + v; });
+    } else if (storyMode === "C") {
+      if (Object.keys(anchorBefore || {}).length) {
+        expectedAtEnd = { ...(anchorBefore as Record<string, number>) };
+        Object.entries(deltaByAsset).forEach(([a, v]) => { expectedAtEnd![a] = (expectedAtEnd![a] || 0) + v; });
+      }
+    }
+
+    // Build narrative
+    const L: string[] = [];
+
+    if (storyMode === "A") {
+      const amt = Number(transferAmount) || 0;
+      L.push(`${T0} (UTC+0) — You made a TRANSFER of ${fmtSigned(amt)} ${transferAsset} to your Futures USDⓂ Wallet.`);
+      if (anchorBefore && anchorAfter) {
+        L.push(`With this transfer your wallet moved from:`);
+        L.push("  BEFORE at T0:");
+        L.push(`    ${mapToPrettyList(anchorBefore)}`);
+        L.push("  AFTER at T0:");
+        L.push(`    ${mapToPrettyList(anchorAfter)}`);
+      }
+      L.push("");
+    } else if (storyMode === "B") {
+      L.push(`Snapshot at ${T0} (UTC+0) — Wallet AFTER snapshot:`);
+      if (anchorAfter) L.push(`  ${mapToPrettyList(anchorAfter)}`);
+      if (anchorBefore) {
+        L.push("Inferred BEFORE (from provided transfer):");
+        L.push(`  ${mapToPrettyList(anchorBefore)}`);
+      }
+      L.push("");
+    } else {
+      L.push(`Between ${T0} and ${T1} (UTC+0):`);
+      if (anchorBefore && Object.keys(anchorBefore).length) {
+        L.push("  Balances at start (agent-provided):");
+        L.push(`    ${mapToPrettyList(anchorBefore)}`);
+      }
+      L.push("");
+    }
+
+    L.push("From your transaction history in this window, here's what happened:");
+
+    const section = (title: string, m: Record<string, { pos: number; neg: number; net: number }>, opts?: { showNet?: boolean }) => {
+      const assets = Object.keys(m).filter((a) => gt(m[a].pos) || gt(m[a].neg) || gt(m[a].net));
+      if (!assets.length) return;
+      L.push(`- ${title}:`);
+      assets.sort().forEach((a) => {
+        const v = m[a];
+        const parts: string[] = [];
+        if (gt(v.pos)) parts.push(`+${fmtAbs(v.pos)}`);
+        if (gt(v.neg)) parts.push(`−${fmtAbs(v.neg)}`);
+        if (opts?.showNet && gt(v.net)) parts.push(`${fmtSigned(v.net)}`);
+        L.push(`    ${a}: ${parts.join(" / ") || "0"}`);
+      });
+    };
+
+    section("Realized PnL", catsAll.realized);
+    section("Trading Fees / Commission", catsAll.commission);
+    section("Referral Kickback", catsAll.referral);
+    section("Funding Fees", catsAll.funding);
+    section("Insurance / Liquidation", catsAll.insurance);
+    section("Transfers (General)", catsAll.transferGen, { showNet: true });
+    if (includeGridbot) section("Futures GridBot Wallet transfers", catsAll.gridbot, { showNet: true });
+    section("Coin Swaps", catsAll.coinSwap, { showNet: true });
+    section("Auto-Exchange", catsAll.autoEx, { showNet: true });
+
+    if (!includeEvents) {
+      section("Event Contracts — Payouts", catsAll.eventPayouts);
+      section("Event Contracts — Orders", catsAll.eventOrders);
+    } else {
+      L.push("- Event Contracts were included in the balance math for this window.");
+    }
+
+    // Other non-event types
+    const otherKeys = Object.keys(catsAll.otherNonEvent).sort();
+    otherKeys.forEach((t) => {
+      section(`Other — ${friendlyTypeName(t)}`, catsAll.otherNonEvent[t], { showNet: true });
+    });
+
+    L.push("");
+
+    if (expectedAtEnd) {
+      L.push(`${T1 || maxTime} (UTC+0) — Expected wallet balances based on this activity:`);
+      const ks = Object.keys(expectedAtEnd).filter((k) => gt(expectedAtEnd![k]));
+      if (ks.length) {
+        L.push("  " + ks.sort().map((a) => `${fmtAbs(expectedAtEnd![a])} ${a}`).join(", "));
+      } else {
+        L.push("  —");
+      }
+    } else if (storyMode === "C" && !Object.keys(anchorBefore || {}).length) {
+      L.push("Note: No starting balances were provided for the window, so this story lists activity but does not compute expected balances at the end.");
+    }
+
+    return L.join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+
+  function openStoryPreview() {
+    const txt = buildBalanceStory();
+    setStoryText(txt);
+    setStoryPreviewOpen(true);
+  }
+
+  // helpers for TSV paste
+  function pasteToRows(pasted: string): BalanceRow[] {
+    const out: BalanceRow[] = [];
+    pasted.split(/\r?\n/).forEach((line) => {
+      const [a, val] = line.split(/\t|,|\s{2,}/);
+      if (!a || !val) return;
+      if (!ALL_ASSETS.includes(a as AssetCode)) return;
+      out.push({ asset: a as AssetCode, amount: val.trim() });
+    });
+    return out.length ? out : [emptyRow()];
+  }
+
   return (
     <div className="wrap">
       <style>{css}</style>
@@ -1041,7 +1343,7 @@ export default function App() {
       {/* SUMMARY */}
       {activeTab === "summary" && rows.length > 0 && (
         <section className="space">
-          {/* KPI HEADER (row 1: USDT/USDC/BNFCR tiles; row 2: KPIs + actions) */}
+          {/* KPI HEADER (row 1: USDT/USDC/BNFCR tiles; row 2: KPIs + actions + Balance Story) */}
           <div className="kpi sticky card">
             {/* Asset tiles row */}
             <div className="kpi-row asset-tiles">
@@ -1077,10 +1379,12 @@ export default function App() {
                   <div className="kpi-title">Top loser</div><div className="kpi-num">{kpis.topLoser ? `${kpis.topLoser.symbol} ${fmtSigned(kpis.topLoser.net)}` : "—"}</div>
                 </button>
               </div>
+
               <div className="kpi-actions btn-row">
                 <button className="btn btn-success" onClick={copySummary}>Copy Summary (no Swaps)</button>
                 <button className="btn" onClick={copyFullResponse}>Copy Response (Full)</button>
                 <button className="btn" onClick={openFullPreview}>Preview/Edit Full Response</button>
+                <button className="btn btn-dark" onClick={() => setStoryOpen(true)}>Balance Story</button>
               </div>
             </div>
           </div>
@@ -1282,6 +1586,7 @@ export default function App() {
         </section>
       )}
 
+      {/* Full response preview modal */}
       {showFullPreview && (
         <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
           <div className="modal">
@@ -1295,6 +1600,113 @@ export default function App() {
               <button className="btn" onClick={() => setFullPreviewText(buildFullResponse())}>Reset to Auto Text</button>
             </div>
             <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) applies in the auto text.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Balance Story Drawer */}
+      {storyOpen && (
+        <div className="drawer-overlay" onClick={() => setStoryOpen(false)}>
+          <aside className="drawer" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Balance Story">
+            <div className="drawer-head">
+              <h3>Balance Story</h3>
+              <button className="btn" onClick={() => setStoryOpen(false)}>Close</button>
+            </div>
+
+            <div className="form-row">
+              <label>Mode</label>
+              <div className="btn-row">
+                <button className={`btn ${storyMode==="A"?"btn-dark":""}`} onClick={() => setStoryMode("A")}>A) Transfer Snapshot</button>
+                <button className={`btn ${storyMode==="B"?"btn-dark":""}`} onClick={() => setStoryMode("B")}>B) Known After Only</button>
+                <button className={`btn ${storyMode==="C"?"btn-dark":""}`} onClick={() => setStoryMode("C")}>C) Between Dates</button>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              {(storyMode==="A" || storyMode==="B") && (
+                <>
+                  <label>Anchor time (UTC+0)</label>
+                  <input className="input" placeholder="YYYY-MM-DD HH:MM:SS" value={storyT0} onChange={(e)=>setStoryT0(e.target.value)} />
+                </>
+              )}
+              <label>{storyMode==="C" ? "To time (UTC+0)" : "End time (UTC+0)"} (optional)</label>
+              <input className="input" placeholder={maxTime || "YYYY-MM-DD HH:MM:SS"} value={storyT1} onChange={(e)=>setStoryT1(e.target.value)} />
+            </div>
+
+            {(storyMode==="A" || storyMode==="B") && (
+              <details className="subcard" open={storyMode==="A"}>
+                <summary className="bold">Transfer (optional in Mode B)</summary>
+                <div className="form-grid">
+                  <label>Asset</label>
+                  <select className="select" value={transferAsset} onChange={(e)=>setTransferAsset(e.target.value as AssetCode)}>
+                    {ALL_ASSETS.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                  <label>Amount (can be negative)</label>
+                  <input className="input" placeholder="e.g. 300 or -25.5" value={transferAmount} onChange={(e)=>setTransferAmount(e.target.value)} />
+                </div>
+              </details>
+            )}
+
+            {storyMode==="A" && (
+              <>
+                <h4>Wallet BEFORE at anchor time</h4>
+                <BalancesEditor rows={beforeRows} setRows={setBeforeRows} />
+                <div className="hint">AFTER is auto-calculated from BEFORE + Transfer.</div>
+                <h4 style={{marginTop:10}}>Wallet AFTER at anchor time (computed)</h4>
+                <BalancesEditor rows={afterRows} setRows={setAfterRows} readonly />
+              </>
+            )}
+
+            {storyMode==="B" && (
+              <>
+                <h4>Wallet AFTER at anchor time</h4>
+                <BalancesEditor rows={afterRows} setRows={setAfterRows} />
+                <div className="hint">If you also enter a Transfer above, BEFORE will be inferred and shown in the story.</div>
+              </>
+            )}
+
+            {storyMode==="C" && (
+              <>
+                <div className="form-grid">
+                  <label>From time (UTC+0)</label>
+                  <input className="input" placeholder={minTime || "YYYY-MM-DD HH:MM:SS"} value={storyT0} onChange={(e)=>setStoryT0(e.target.value)} />
+                </div>
+                <h4>Balances at From (optional)</h4>
+                <BalancesEditor rows={fromRows} setRows={setFromRows} />
+              </>
+            )}
+
+            <div className="subcard">
+              <h4>Options</h4>
+              <label className="check">
+                <input type="checkbox" checked={includeEvents} onChange={(e)=>setIncludeEvents(e.target.checked)} /> Include Event Contracts in balance math
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={includeGridbot} onChange={(e)=>setIncludeGridbot(e.target.checked)} /> Include Futures GridBot transfers
+              </label>
+            </div>
+
+            <div className="btn-row" style={{ justifyContent:"flex-end", marginTop:8 }}>
+              <button className="btn btn-success" onClick={openStoryPreview}>Build & Preview Story</button>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* Balance Story preview modal */}
+      {storyPreviewOpen && (
+        <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
+          <div className="modal">
+            <div className="modal-head">
+              <h3>Balance Story — Preview &amp; Edit</h3>
+              <button className="btn" onClick={() => setStoryPreviewOpen(false)}>Close</button>
+            </div>
+            <textarea className="modal-text" value={storyText} onChange={(e) => setStoryText(e.target.value)} />
+            <div className="btn-row" style={{ marginTop: 8 }}>
+              <button className="btn btn-success" onClick={() => copyText(storyText)}>Copy Balance Story</button>
+              <button className="btn" onClick={() => setStoryText(buildBalanceStory())}>Rebuild</button>
+            </div>
+            <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) applies to the text only.</p>
           </div>
         </div>
       )}
@@ -1382,6 +1794,74 @@ function OtherTypesBlock({ rows }: { rows: Row[] }) {
   );
 }
 
+function BalRow({
+  row,
+  onChange,
+  readonly,
+  onRemove,
+}: {
+  row: BalanceRow;
+  onChange?: (r: BalanceRow) => void;
+  readonly?: boolean;
+  onRemove?: () => void;
+}) {
+  return (
+    <div className="bal-row">
+      <select className="select" disabled={readonly} value={row.asset} onChange={(e) => onChange?.({ ...row, asset: e.target.value as AssetCode })}>
+        {ALL_ASSETS.map((a) => <option key={a} value={a}>{a}</option>)}
+      </select>
+      <input className="input" disabled={readonly} placeholder="amount (can be negative)" value={row.amount} onChange={(e)=>onChange?.({ ...row, amount: e.target.value })} />
+      {!readonly && <button className="btn" onClick={onRemove}>✕</button>}
+    </div>
+  );
+}
+function BalancesEditor({
+  rows,
+  setRows,
+  readonly,
+}: {
+  rows: BalanceRow[];
+  setRows: (r: BalanceRow[]) => void;
+  readonly?: boolean;
+}) {
+  return (
+    <div className="bal-editor">
+      {rows.map((r, i) => (
+        <BalRow
+          key={i}
+          row={r}
+          readonly={readonly}
+          onRemove={() => setRows(rows.filter((_, idx) => idx !== i))}
+          onChange={(nr) => setRows(rows.map((x, idx) => (idx === i ? nr : x)))}
+        />
+      ))}
+      {!readonly && (
+        <div className="btn-row" style={{marginTop:6}}>
+          <button className="btn" onClick={() => setRows([...rows, emptyRow()])}>+ Add row</button>
+          <details>
+            <summary className="btn">Paste TSV</summary>
+            <div style={{marginTop:6}}>
+              <textarea className="paste" placeholder="Asset[TAB]Amount per line" onPaste={(e)=>{
+                // let user paste anywhere inside; we read value after paste
+                setTimeout(()=>{
+                  const ta = e.target as HTMLTextAreaElement;
+                  const next = pasteToRows(ta.value);
+                  setRows(next);
+                  ta.value = "";
+                },0);
+              }} />
+              <div className="hint">Example:{"\n"}USDT↹300{"\n"}BTC↹-0.12</div>
+            </div>
+          </details>
+          <div className="btn-row">
+            {ALL_ASSETS.map(a => <button key={a} className="btn btn-small" onClick={()=>setRows([...rows, {asset:a as AssetCode, amount:""}])}>{a}</button>)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- CSS (embedded) ---------- */
 const css = `
 :root{
@@ -1397,6 +1877,7 @@ const css = `
 .muted{color:var(--muted)}
 .good{color:#059669}
 .bad{color:#dc2626}
+.bold{font-weight:700}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap}
 .btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer;font-weight:600}
 .btn:hover{background:#f9fafb}
@@ -1410,7 +1891,7 @@ const css = `
 .space{max-width:1200px;margin:0 auto;padding:0 16px 24px}
 .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);padding:16px;margin:12px 0;overflow:hidden}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap}
-.subcard{border-top:1px dashed var(--line);padding-top:12px;margin-top:12px}
+.subcard{border:1px dashed var(--line);padding:10px;border-radius:10px;background:#fcfdfd}
 .grid{display:grid;gap:12px;align-items:start}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
 .kv{display:grid;gap:8px}
@@ -1436,6 +1917,7 @@ const css = `
 .table.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .table.small td,.table.small th{padding:8px 10px}
 .select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff}
+.input{border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%;background:#fff}
 .list{margin:0;padding:0 0 0 18px}
 .hint{margin-top:8px;font-size:12px;color:var(--muted)}
 .typecard{background:#fcfdfd;border:1px dashed var(--line);border-radius:12px;padding:10px}
@@ -1457,7 +1939,7 @@ const css = `
 .kpi-title{font-size:12px;color:var(--muted);font-weight:700;margin-bottom:2px}
 .kpi-num{font-weight:800}
 
-/* NEW: Asset KPI Tiles (USDT/USDC/BNFCR) */
+/* Asset KPI Tiles (USDT/USDC/BNFCR) */
 .asset-tiles{grid-template-columns:repeat(3, minmax(240px, 1fr))}
 .asset-tile{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:86px}
 .asset-title{font-size:12px;color:var(--muted);font-weight:800}
@@ -1468,7 +1950,7 @@ const css = `
 .chip.bad{color:#dc2626;border-color:#fee2e2;background:#fef2f2}
 .chip.muted{color:var(--muted);border-color:var(--line);background:#f7f8fb}
 
-/* Dual-pane layout: THREE columns (left | splitter | right) */
+/* Dual-pane layout */
 .dual{display:grid;gap:10px;grid-template-columns:minmax(0,1fr) ${SPLIT_W}px 45%;align-items:start;margin-top:8px}
 .left{min-width:0}
 .right{min-width:0;position:sticky;top:96px;align-self:start;max-height:calc(100vh - 120px);display:flex;flex-direction:column}
@@ -1491,6 +1973,16 @@ const css = `
 .modal{width:min(980px, 100%);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,.2);padding:14px;display:flex;flex-direction:column}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .modal-text{width:100%;height:55vh;border:1px solid var(--line);border-radius:10px;padding:10px;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;background:#fbfcfe}
+
+/* Drawer (Balance Story) */
+.drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;justify-content:flex-end;z-index:1000}
+.drawer{width:min(560px,100%);height:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-20px 0 40px rgba(0,0,0,.2);padding:14px 16px;overflow:auto}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.form-grid{display:grid;grid-template-columns:180px 1fr;gap:8px;align-items:center}
+.form-row{margin:8px 0}
+.check{display:flex;align-items:center;gap:8px;margin:6px 0}
+.bal-editor{border:1px solid var(--line);border-radius:10px;padding:8px;background:#fbfcfe}
+.bal-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;margin-bottom:6px}
 
 /* Responsive stacking */
 @media (max-width: 980px){
