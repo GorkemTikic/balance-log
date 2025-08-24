@@ -886,26 +886,23 @@ function useStoryComputer(
 function buildUserViewText(ctx: NonNullable<ReturnType<typeof useStoryComputer>>) {
   const { T0, T1, catsDisplay, anchorAfter, anchorBefore, expectedAtEnd } = ctx;
   const out: string[] = [];
-  if (anchorAfter && anchorBefore) {
-    out.push(`On ${T0} (UTC+0), you transferred ${Object.keys(anchorAfter).find(a => (anchorAfter[a]||0) !== (anchorBefore[a]||0)) ? "" : ""}`); // intro will be clarified below
-  }
 
-  // Opening (mode-agnostic, readable)
+  // Opening
   if (anchorBefore && anchorAfter) {
-    // Mode A
-    const diffs: string[] = [];
-    Object.keys(anchorAfter).forEach((a) => {
-      const before = anchorBefore[a] || 0;
-      const after = anchorAfter[a] || 0;
-      if (Math.abs(after - before) > EPS) {
-        diffs.push(`${fmtAbs(after - before)} ${a}`);
-      }
-    });
-    const transferPhrase = diffs.length ? diffs.join(", ") : "a transfer";
-    out.push(`On ${T0} (UTC+0), you made ${transferPhrase}. At that time, your balance moved from ${Object.keys(anchorBefore).length ? Object.keys(anchorBefore).sort().map(a => `${fmtAbs(anchorBefore[a])} ${a}`).join(", ") : "—"} to ${Object.keys(anchorAfter).length ? Object.keys(anchorAfter).sort().map(a => `${fmtAbs(anchorAfter[a])} ${a}`).join(", ") : "—"}.`);
+    // Mode A-like intro
+    const beforeTxt = Object.keys(anchorBefore).length
+      ? Object.keys(anchorBefore).sort().map((a) => `${fmtAbs(anchorBefore[a])} ${a}`).join(", ")
+      : "—";
+    const afterTxt = Object.keys(anchorAfter).length
+      ? Object.keys(anchorAfter).sort().map((a) => `${fmtAbs(anchorAfter[a])} ${a}`).join(", ")
+      : "—";
+    out.push(`On ${T0} (UTC+0), you made a transfer. At that time, your balance moved from ${beforeTxt} to ${afterTxt}.`);
   } else if (anchorAfter && !anchorBefore) {
     // Mode B
-    out.push(`At ${T0} (UTC+0), this was your Futures Wallet snapshot: ${Object.keys(anchorAfter).length ? Object.keys(anchorAfter).sort().map(a => `${fmtAbs(anchorAfter[a])} ${a}`).join(", ") : "—"}.`);
+    const snap = Object.keys(anchorAfter).length
+      ? Object.keys(anchorAfter).sort().map((a) => `${fmtAbs(anchorAfter[a])} ${a}`).join(", ")
+      : "—";
+    out.push(`At ${T0} (UTC+0), this was your Futures Wallet snapshot: ${snap}.`);
   } else {
     // Mode C
     out.push(`Between ${T0} and ${T1} (UTC+0), here is what changed in your Futures Wallet.`);
@@ -928,20 +925,54 @@ function buildUserViewText(ctx: NonNullable<ReturnType<typeof useStoryComputer>>
   const ordered = Array.from(assets).sort();
   if (ordered.length) out.push("", "What happened next:");
 
+  const friendlyLinesLocal = (
+    asset: string,
+    map: Record<string, { pos: number; neg: number; net: number }>,
+    label: string,
+    kind: string
+  ) => {
+    const v = map[asset];
+    if (!v || (!(Math.abs(v.pos) > EPS || Math.abs(v.neg) > EPS || Math.abs(v.net) > EPS))) return [];
+    const L: string[] = [];
+    if (kind === "trading")
+      L.push(`Trading (Realized PnL) — profits and losses from closed positions: earned ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)}` : "0"}, lost ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)}` : "0"} → net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "fees")
+      L.push(`Trading fees — charged when orders are executed: ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "funding")
+      L.push(`Funding fees — periodic payments between long and short positions: received ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)}` : "0"}, paid ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)}` : "0"} → net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "insurance")
+      L.push(`Insurance / Liquidation Clearance Fee — liquidation-related adjustments: received ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)}` : "0"}, paid ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)}` : "0"} → net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "transfers")
+      L.push(`Transfers — money moved into and out of your Futures Wallet: in ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)}` : "0"}, out ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)}` : "0"} → net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "gridbot")
+      L.push(`GridBot transfers — transfers with your GridBot Wallet: in ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)}` : "0"}, out ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)}` : "0"} → net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "swaps")
+      L.push(`Coin Swaps — conversions between assets: net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "auto")
+      L.push(`Auto-Exchange — automatic conversions to clear negative balances: net ${fmtSigned(v.net)} ${asset}.`);
+    if (kind === "eventsP")
+      L.push(`Event Contracts — payouts: ${Math.abs(v.pos) > EPS ? `+${fmtAbs(v.pos)} ${asset}` : "0"}.`);
+    if (kind === "eventsO")
+      L.push(`Event Contracts — orders to participate: ${Math.abs(v.neg) > EPS ? `−${fmtAbs(v.neg)} ${asset}` : "0"}.`);
+    if (kind === "other")
+      L.push(`${label}: net ${fmtSigned(v.net)} ${asset}.`);
+    return L;
+  };
+
   ordered.forEach((asset) => {
     const L: string[] = [];
-    L.push(...friendlyLines(asset, catsDisplay.realized, "", "trading"));
-    L.push(...friendlyLines(asset, catsDisplay.commission, "", "fees"));
-    L.push(...friendlyLines(asset, catsDisplay.funding, "", "funding"));
-    L.push(...friendlyLines(asset, catsDisplay.insurance, "", "insurance"));
-    L.push(...friendlyLines(asset, catsDisplay.transferGen, "", "transfers"));
-    L.push(...friendlyLines(asset, catsDisplay.gridbot, "", "gridbot"));
-    L.push(...friendlyLines(asset, catsDisplay.coinSwap, "", "swaps"));
-    L.push(...friendlyLines(asset, catsDisplay.autoEx, "", "auto"));
-    L.push(...friendlyLines(asset, catsDisplay.eventPayouts, "", "eventsP"));
-    L.push(...friendlyLines(asset, catsDisplay.eventOrders, "", "eventsO"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.realized, "", "trading"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.commission, "", "fees"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.funding, "", "funding"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.insurance, "", "insurance"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.transferGen, "", "transfers"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.gridbot, "", "gridbot"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.coinSwap, "", "swaps"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.autoEx, "", "auto"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.eventPayouts, "", "eventsP"));
+    L.push(...friendlyLinesLocal(asset, catsDisplay.eventOrders, "", "eventsO"));
     Object.entries(catsDisplay.otherNonEvent).forEach(([t, byA]) => {
-      if (byA[asset]) L.push(...friendlyLines(asset, byA as any, friendlyTypeName(t), "other"));
+      if ((byA as any)[asset]) L.push(...friendlyLinesLocal(asset, byA as any, friendlyTypeName(t), "other"));
     });
     if (L.length) {
       out.push(`\n🔹 ${asset}`);
@@ -1373,154 +1404,154 @@ function useOpenStoryPreview(
         ))}
       </nav>
 
-      {/* Story drawer (settings) */}
-      {storyOpen && (
-        <div className="overlay" onClick={() => setStoryOpen(false)}>
-          <aside
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Balance Story"
+{/* Story drawer (settings) */}
+{storyOpen && (
+  <div className="overlay" onClick={() => setStoryOpen(false)}>
+    <aside
+      className="modal"
+      onClick={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Balance Story"
+    >
+      <div className="modal-head">
+        <h3>Balance Story</h3>
+        <button className="btn" onClick={() => setStoryOpen(false)}>
+          Close
+        </button>
+      </div>
+
+      <div style={{ padding: "10px 12px" }}>
+        <div className="btn-row" style={{ marginBottom: 8 }}>
+          <label className="muted">Mode</label>
+          <select
+            className="btn"
+            value={storyMode}
+            onChange={(e) => {
+              setStoryMode(e.target.value as any);
+              localStorage.setItem("storyMode", e.target.value);
+            }}
           >
-            <div className="modal-head">
-              <h3>Balance Story</h3>
-              <button className="btn" onClick={() => setStoryOpen(false)}>
-                Close
-              </button>
-            </div>
-
-            <div style={{ padding: "10px 12px" }}>
-              <div className="btn-row" style={{ marginBottom: 8 }}>
-                <label className="muted">Mode</label>
-                <select
-                  className="btn"
-                  value={storyMode}
-                  onChange={(e) => {
-                    setStoryMode(e.target.value as any);
-                    localStorage.setItem("storyMode", e.target.value);
-                  }}
-                >
-                  <option value="A">A — Transfer snapshot</option>
-                  <option value="B">B — Known After</option>
-                  <option value="C">C — Between dates</option>
-                </select>
-              </div>
-
-              <div className="btn-row" style={{ marginBottom: 8 }}>
-                <input
-                  className="btn"
-                  placeholder="Start YYYY-MM-DD HH:MM:SS (UTC+0)"
-                  value={storyT0}
-                  onChange={(e) => {
-                    setStoryT0(e.target.value);
-                    localStorage.setItem("storyT0", e.target.value);
-                  }}
-                />
-                <input
-                  className="btn"
-                  placeholder="End YYYY-MM-DD HH:MM:SS (UTC+0)"
-                  value={storyT1}
-                  onChange={(e) => {
-                    setStoryT1(e.target.value);
-                    localStorage.setItem("storyT1", e.target.value);
-                  }}
-                />
-              </div>
-
-              {storyMode !== "C" && (
-                <>
-                  <div className="btn-row" style={{ marginBottom: 8 }}>
-                    <label className="muted">Transfer</label>
-                    <select
-                      className="btn"
-                      value={transferAsset}
-                      onChange={(e) => setTransferAsset(e.target.value as AssetCode)}
-                    >
-                      {ALL_ASSETS.map((a) => (
-                        <option key={a} value={a}>
-                          {a}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      className="btn"
-                      placeholder="Amount (e.g., 60.70806999)"
-                      value={transferAmount}
-                      onChange={(e) => setTransferAmount(e.target.value)}
-                    />
-                  </div>
-
-                  <div style={{ marginBottom: 8 }}>
-                    <div className="muted" style={{ marginBottom: 4 }}>
-                      BEFORE balances (ASSET<TAB>amount)
-                    </div>
-                    <textarea
-                      className="modal-text"
-                      style={{ minHeight: 60 }}
-                      value={beforeRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
-                      onChange={(e) => setBeforeRows(pasteToRows(e.target.value))}
-                    />
-                  </div>
-                  <div style={{ marginBottom: 8 }}>
-                    <div className="muted" style={{ marginBottom: 4 }}>
-                      AFTER balances (ASSET<TAB>amount)
-                    </div>
-                    <textarea
-                      className="modal-text"
-                      style={{ minHeight: 60 }}
-                      value={afterRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
-                      onChange={(e) => setAfterRows(pasteToRows(e.target.value))}
-                    />
-                  </div>
-                </>
-              )}
-
-              {storyMode === "C" && (
-                <div style={{ marginBottom: 8 }}>
-                  <div className="muted" style={{ marginBottom: 4 }}>
-                    Starting balances at window start (optional) — ASSET<TAB>amount
-                  </div>
-                  <textarea
-                    className="modal-text"
-                    style={{ minHeight: 60 }}
-                    value={fromRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
-                    onChange={(e) => setFromRows(pasteToRows(e.target.value))}
-                  />
-                </div>
-              )}
-
-              <div className="btn-row" style={{ marginBottom: 8 }}>
-                <label className="muted">
-                  <input
-                    type="checkbox"
-                    checked={includeEvents}
-                    onChange={(e) => setIncludeEvents(e.target.checked)}
-                    style={{ marginRight: 6 }}
-                  />
-                  Include Event Contracts in math
-                </label>
-                <label className="muted">
-                  <input
-                    type="checkbox"
-                    checked={includeGridbot}
-                    onChange={(e) => setIncludeGridbot(e.target.checked)}
-                    style={{ marginRight: 6 }}
-                  />
-                  Include GridBot transfers
-                </label>
-              </div>
-
-              <div className="btn-row" style={{ justifyContent: "flex-end" }}>
-                <button className="btn btn-success" onClick={openStoryPreview}>
-                  Build & Preview Story
-                </button>
-              </div>
-            </div>
-          </aside>
+            <option value="A">A — Transfer snapshot</option>
+            <option value="B">B — Known After</option>
+            <option value="C">C — Between dates</option>
+          </select>
         </div>
-      )}
 
+        <div className="btn-row" style={{ marginBottom: 8 }}>
+          <input
+            className="btn"
+            placeholder="Start YYYY-MM-DD HH:MM:SS (UTC+0)"
+            value={storyT0}
+            onChange={(e) => {
+              setStoryT0(e.target.value);
+              localStorage.setItem("storyT0", e.target.value);
+            }}
+          />
+          <input
+            className="btn"
+            placeholder="End YYYY-MM-DD HH:MM:SS (UTC+0)"
+            value={storyT1}
+            onChange={(e) => {
+              setStoryT1(e.target.value);
+              localStorage.setItem("storyT1", e.target.value);
+            }}
+          />
+        </div>
+
+        {storyMode !== "C" && (
+          <>
+            <div className="btn-row" style={{ marginBottom: 8 }}>
+              <label className="muted">Transfer</label>
+              <select
+                className="btn"
+                value={transferAsset}
+                onChange={(e) => setTransferAsset(e.target.value as AssetCode)}
+              >
+                {ALL_ASSETS.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="btn"
+                placeholder="Amount (e.g., 60.70806999)"
+                value={transferAmount}
+                onChange={(e) => setTransferAmount(e.target.value)}
+              />
+            </div>
+
+            <div style={{ marginBottom: 8 }}>
+              <div className="muted" style={{ marginBottom: 4 }}>
+                BEFORE balances (ASSET&lt;TAB&gt;amount)
+              </div>
+              <textarea
+                className="modal-text"
+                style={{ minHeight: 60 }}
+                value={beforeRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
+                onChange={(e) => setBeforeRows(pasteToRows(e.target.value))}
+              />
+            </div>
+
+            <div style={{ marginBottom: 8 }}>
+              <div className="muted" style={{ marginBottom: 4 }}>
+                AFTER balances (ASSET&lt;TAB&gt;amount)
+              </div>
+              <textarea
+                className="modal-text"
+                style={{ minHeight: 60 }}
+                value={afterRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
+                onChange={(e) => setAfterRows(pasteToRows(e.target.value))}
+              />
+            </div>
+          </>
+        )}
+
+        {storyMode === "C" && (
+          <div style={{ marginBottom: 8 }}>
+            <div className="muted" style={{ marginBottom: 4 }}>
+              Starting balances at window start (optional) — ASSET&lt;TAB&gt;amount
+            </div>
+            <textarea
+              className="modal-text"
+              style={{ minHeight: 60 }}
+              value={fromRows.map((r) => `${r.asset}\t${r.amount}`).join("\n")}
+              onChange={(e) => setFromRows(pasteToRows(e.target.value))}
+            />
+          </div>
+        )}
+
+        <div className="btn-row" style={{ marginBottom: 8 }}>
+          <label className="muted">
+            <input
+              type="checkbox"
+              checked={includeEvents}
+              onChange={(e) => setIncludeEvents(e.target.checked)}
+              style={{ marginRight: 6 }}
+            />
+            Include Event Contracts in math
+          </label>
+          <label className="muted">
+            <input
+              type="checkbox"
+              checked={includeGridbot}
+              onChange={(e) => setIncludeGridbot(e.target.checked)}
+              style={{ marginRight: 6 }}
+            />
+            Include GridBot transfers
+          </label>
+        </div>
+
+        <div className="btn-row" style={{ justifyContent: "flex-end" }}>
+          <button className="btn btn-success" onClick={openStoryPreview}>
+            Build & Preview Story
+          </button>
+        </div>
+      </div>
+    </aside>
+  </div>
+)}
       {/* Balance Story preview modal (tabbed) */}
       {storyPreviewOpen && (
         <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
