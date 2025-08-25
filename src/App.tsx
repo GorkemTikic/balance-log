@@ -1,8 +1,8 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
-import { Row, AssetCode, ALL_ASSETS } from "./types";
-import { TYPE, EVENT_PREFIX, EVENT_KNOWN_CORE, KNOWN_TYPES, EPS, SPLIT_W } from "./constants";
-import { fmtAbs, fmtSigned, gt, friendlyTypeName, toCsv } from "./utils/format";
-import { normalizeTimeString, parseUtcMs, tsToUtcString } from "./utils/time";
+import { Row } from "./types";
+import { TYPE, EVENT_PREFIX, EVENT_KNOWN_CORE, KNOWN_TYPES, SPLIT_W } from "./constants";
+import { fmtAbs, fmtSigned, gt, toCsv } from "./utils/format";
+import { tsToUtcString } from "./utils/time";
 import { parseBalanceLog } from "./utils/parsing";
 import { sumByAsset, bySymbolSummary, groupSwaps } from "./utils/aggregation";
 
@@ -22,12 +22,12 @@ export default function App() {
   const [fullPreviewText, setFullPreviewText] = useState("");
   const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
 
-  // Pane sizing
+  // Pane sizing (wider default so numbers fit)
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rightPct, setRightPct] = useState<number>(() => {
     const v = localStorage.getItem("paneRightPct");
-    const n = v ? Number(v) : 45;
-    return isFinite(n) ? Math.min(60, Math.max(36, n)) : 45;
+    const n = v ? Number(v) : 55;
+    return isFinite(n) ? Math.min(70, Math.max(36, n)) : 55;
   });
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -38,7 +38,7 @@ export default function App() {
       const cw = rect.width;
       const newRightPct = ((cw - x) / cw) * 100;
       const minPct = (420 / cw) * 100;
-      const clamped = Math.min(60, Math.max(minPct, newRightPct));
+      const clamped = Math.min(70, Math.max(minPct, newRightPct));
       setRightPct(clamped);
     }
     function onUp() {
@@ -220,13 +220,6 @@ export default function App() {
   const topWinner = symbolNetStats[0];
   const topLoser = symbolNetStats.slice().reverse()[0];
 
-  const kpis = useMemo(() => ({
-    tradesParsed: rows.length,
-    activeSymbols: allSymbolBlocks.length,
-    topWinner,
-    topLoser,
-  }), [rows.length, allSymbolBlocks.length, topWinner, topLoser]);
-
   const focusSymbolRow = (symbol?: string) => {
     if (!symbol) return;
     setTimeout(() => {
@@ -237,7 +230,7 @@ export default function App() {
     }, 60);
   };
 
-  /* ---------- full response builder (unchanged behavior) ---------- */
+  /* ---------- full response builder ---------- */
   const totalByAsset = useMemo(() => {
     const totals: Record<string, number> = {};
     const bump = (map: Record<string, { net: number }>) => {
@@ -312,7 +305,7 @@ export default function App() {
       if (ae){ pushIf(gt(ae.pos), `  Auto-Exchange Received ${asset}: +${fmtAbs(ae.pos)}`); pushIf(gt(ae.neg), `  Auto-Exchange Used ${asset}: −${fmtAbs(ae.neg)}`); }
       if (ep) pushIf(gt(ep.pos), `  Event Contracts Payout ${asset}: +${fmtAbs(ep.pos)}`);
       if (eo) pushIf(gt(eo.neg), `  Event Contracts Order ${asset}: −${fmtAbs(eo.neg)}`);
-      if (tr && (gt(tr.pos) || gt(tr.neg))) L.push(`  Transfers (General) — Received ${asset}: +${fmtAbs(tr.pos)} / Paid ${fmtAbs(tr.neg) ? "−"+fmtAbs(tr.neg) : "0"}`);
+      if (tr && (gt(tr.pos) || gt(tr.neg))) L.push(`  Transfers (General) — Received ${asset}: +${fmtAbs(tr.pos)} / Paid ${gt(tr.neg) ? "−"+fmtAbs(tr.neg) : "0"}`);
       if (gb && (gt(gb.pos) || gt(gb.neg))) L.push(`  Total Transfer To/From the Futures GridBot Wallet — ${asset}: −${fmtAbs(gb.neg)} / +${fmtAbs(gb.pos)}`);
 
       const net = totalByAsset[asset] ?? 0;
@@ -409,7 +402,7 @@ export default function App() {
               <div className="kpi-actions btn-row">
                 <button className="btn btn-success" onClick={() => copyText(buildFullResponse())}>Copy Summary (Full)</button>
                 <button className="btn" onClick={() => { setFullPreviewText(buildFullResponse()); setShowFullPreview(true); }}>Preview/Edit Full Response</button>
-                <button className="btn" onClick={() => setActiveTab("events")}>Balance Story</button>
+                <button className="btn" onClick={() => setActiveTab("events")}>Event Contracts</button>
               </div>
             </div>
           </div>
@@ -612,7 +605,6 @@ export default function App() {
               <div className="btn-row">
                 <button className="btn" onClick={() => {
                   if (!rows.length) return;
-                  const headers = ["time","type","asset","amount","symbol","id","uid","extra"];
                   const csv = toCsv(rows.map(r => ({ time: r.time, type: r.type, asset: r.asset, amount: r.amount, symbol: r.symbol, id: r.id, uid: r.uid, extra: r.extra })));
                   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
                   const url = URL.createObjectURL(blob);
