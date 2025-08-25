@@ -1,13 +1,35 @@
 <!doctype html>
 <html>
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Balance Log</title>
-</head>
-<body>
-<div id="root"></div>
-<!-- IMPORTANT: this path must point to /src/main.tsx -->
-<script type="module" src="/src/main.tsx"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Balance Log</title>
+    <style>
+      /* minimal body style so you see text even before React mounts */
+      body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+      #boot { padding: 10px; color:#555 }
+      #error-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); color:#fff; padding: 16px; display:none; z-index: 9999; overflow:auto; }
+      #error-overlay pre { white-space: pre-wrap; word-break: break-word; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot">Loading…</div>
+    <div id="error-overlay"><h2>Runtime error</h2><pre id="error-text"></pre></div>
+
+    <!-- IMPORTANT: since you moved main.tsx into /src/, point here -->
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Show any uncaught errors instead of a blank page -->
+    <script>
+      const showErr = (msg, err) => {
+        const o = document.getElementById('error-overlay');
+        const t = document.getElementById('error-text');
+        o.style.display = 'block';
+        t.textContent = String(msg) + (err && err.stack ? "\n\n" + err.stack : "");
+      };
+      window.addEventListener('error', (e) => showErr(e.message, e.error));
+      window.addEventListener('unhandledrejection', (e) => showErr(e.reason?.message||e.reason, e.reason));
+    </script>
+  </body>
 </html>
