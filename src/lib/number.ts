@@ -1,20 +1,23 @@
-// src/lib/number.ts
-// Small, shared numeric helpers. No app behavior changes.
-
+// lib/number.ts
 export const EPS = 1e-12;
-
 export const abs = (x: number) => Math.abs(Number(x) || 0);
 export const gt = (x: number) => abs(x) > EPS;
 
-/** Keep as many decimals as JS preserves; avoid extra rounding. */
-export function fmtAbs(x: number, _maxDp = 12): string {
+export function fmtAbs(x: number) {
   const v = abs(x);
-  const s = v.toString().includes("e") ? v.toFixed(12) : v.toString();
-  return s;
+  return v.toString().includes("e") ? v.toFixed(12) : String(v);
 }
-
-export function fmtSigned(x: number, _maxDp = 12): string {
+export function fmtSigned(x: number) {
   const n = Number(x) || 0;
-  const sign = n >= 0 ? "+" : "−";
-  return `${sign}${fmtAbs(n)}`;
+  return `${n >= 0 ? "+" : "−"}${fmtAbs(n)}`;
+}
+export function toCsv<T extends object>(rows: T[]) {
+  if (!rows.length) return "";
+  const headers = Object.keys(rows[0]) as (keyof T)[];
+  const esc = (v: unknown) => {
+    const s = String(v ?? "");
+    return /[,"\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+  };
+  const body = rows.map((r) => headers.map((h) => esc((r as any)[h])).join(","));
+  return [headers.join(","), ...body].join("\n");
 }
