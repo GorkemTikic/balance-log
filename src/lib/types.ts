@@ -1,11 +1,11 @@
-// src/lib/types.ts
+// lib/types.ts
 export type Row = {
   id: string;
   uid: string;
   asset: string;
   type: string;
   amount: number;
-  time: string; // "YYYY-MM-DD HH:MM:SS" UTC+0
+  time: string; // "YYYY-MM-DD HH:MM:SS" (UTC+0)
   ts: number;   // epoch ms (UTC)
   symbol: string;
   extra: string;
@@ -29,33 +29,19 @@ export const TYPE = {
 } as const;
 
 export const EVENT_PREFIX = "EVENT_CONTRACTS_";
-export const EVENT_KNOWN_CORE = new Set([
-  TYPE.EVENT_ORDER,
-  TYPE.EVENT_PAYOUT,
-]);
+export const EVENT_KNOWN_CORE = new Set([TYPE.EVENT_ORDER, TYPE.EVENT_PAYOUT]);
 
 export const KNOWN_TYPES = new Set<string>([
-  TYPE.REALIZED_PNL,
-  TYPE.FUNDING_FEE,
-  TYPE.COMMISSION,
-  TYPE.INSURANCE_CLEAR,
-  TYPE.LIQUIDATION_FEE,
-  TYPE.REFERRAL_KICKBACK,
-  TYPE.TRANSFER,
-  TYPE.GRIDBOT_TRANSFER,
-  TYPE.COIN_SWAP_DEPOSIT,
-  TYPE.COIN_SWAP_WITHDRAW,
-  TYPE.AUTO_EXCHANGE,
-  TYPE.EVENT_ORDER,
-  TYPE.EVENT_PAYOUT,
+  TYPE.REALIZED_PNL, TYPE.FUNDING_FEE, TYPE.COMMISSION,
+  TYPE.INSURANCE_CLEAR, TYPE.LIQUIDATION_FEE, TYPE.REFERRAL_KICKBACK,
+  TYPE.TRANSFER, TYPE.GRIDBOT_TRANSFER,
+  TYPE.COIN_SWAP_DEPOSIT, TYPE.COIN_SWAP_WITHDRAW,
+  TYPE.AUTO_EXCHANGE, TYPE.EVENT_ORDER, TYPE.EVENT_PAYOUT,
 ]);
 
-export const EPS = 1e-12;
-export const SPLIT_W = 12;
+export const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/;
+export const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB|BNFCR)$/;
 
+export const EPS = 1e-12;
 export const ALL_ASSETS = ["BTC","LDUSDT","BFUSD","FDUSD","BNB","ETH","USDT","USDC","BNFCR"] as const;
 export type AssetCode = typeof ALL_ASSETS[number];
-
-export type BalanceRow = { asset: AssetCode; amount: string };
-
-export type SwapKind = "COIN_SWAP" | "AUTO_EXCHANGE";
