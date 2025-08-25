@@ -1,10 +1,11 @@
-// src/components/EventsSection.tsx
 import React from "react";
-import EventSummary from "./EventSummary";
 import { Row, EVENT_KNOWN_CORE } from "../lib/types";
+import EventSummary from "./EventSummary";
 import OtherTypesBlock from "./OtherTypesBlock";
 
-export default function EventsSection({ rows, onCopy }: { rows: Row[]; onCopy: () => void }) {
+export default function EventsSection({
+  rows, onCopy,
+}: { rows: Row[]; onCopy: () => void }) {
   const eventOther = rows.filter((r) => !EVENT_KNOWN_CORE.has(r.type));
   return (
     <div className="card">
