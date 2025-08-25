@@ -1,6 +1,11 @@
-// src/components/GridPasteBox.tsx
 import React, { useState } from "react";
 
+/**
+ * GridPasteBox
+ * - Lets the user paste an HTML table (copied from a web page) or plain text/TSV.
+ * - Shows a quick preview.
+ * - On "Use & Parse", emits a single TSV string via onUseTSV(tsv).
+ */
 export default function GridPasteBox({
   onUseTSV,
   onError,
@@ -37,11 +42,13 @@ export default function GridPasteBox({
   function parseTextToGrid(text: string): string[][] {
     if (!text) return [];
     if (text.includes("\t")) {
+      // Real TSV from spreadsheets
       return text
         .split(/\r?\n/)
         .filter((l) => l.trim().length)
         .map((l) => l.split("\t"));
     }
+    // Fallback: split by multiple spaces / " | " separators
     return text
       .split(/\r?\n/)
       .filter((l) => l.trim().length)
@@ -79,12 +86,14 @@ export default function GridPasteBox({
       <div className="card-head">
         <h3>Paste Table (Excel-like)</h3>
       </div>
+
       <div
         className="dropzone"
         contentEditable
         suppressContentEditableWarning
         onPaste={handlePaste}
         onKeyDown={(e) => {
+          // Keep this area purely for pasting (Ctrl/⌘+V). Prevent other typing.
           if (!(e.ctrlKey || e.metaKey) || (e.key.toLowerCase() !== "v" && e.key !== "V")) {
             e.preventDefault();
           }
@@ -95,7 +104,7 @@ export default function GridPasteBox({
 
       <div className="btn-row" style={{ marginTop: 8 }}>
         <button className="btn btn-dark" onClick={useAndParse}>
-          Use & Parse
+          Use &amp; Parse
         </button>
         <span className="muted">{info}</span>
       </div>
