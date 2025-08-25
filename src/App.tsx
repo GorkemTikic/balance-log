@@ -1108,7 +1108,7 @@ export default function App() {
   }, [storyMode, beforeRows, transferAsset, transferAmount]);
 
   /* ---------- Balance Story generator ---------- */
-  function buildBalanceStoryAgent(): string {
+  function Agent(): string {
   if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
 
   const L: string[] = [];
@@ -1415,12 +1415,308 @@ export default function App() {
     return L.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
- function openStoryPreview() {
-  const userTxt = buildBalanceStoryUser();
-  const agentTxt = buildBalanceStoryAgent();
-  setStoryTextUser(userTxt);
-  setStoryTextAgent(agentTxt);
-  setStoryPreviewOpen(true);
+ /* ---------- Balance Story: dual outputs ---------- */
+/**
+ * Friendly, chat-ready version for users.
+ * Natural tone, no jargon, no “mathy” formatting.
+ */
+function buildStoryFriendly(): string {
+  // Reuse the same engine that buildBalanceStory uses,
+  // but re-run the key parts locally to format differently.
+  // We’ll pull from the same state in closure.
+  // NOTE: this function lives inside the App component scope,
+  // so it can see rows, storyMode, etc.
+  if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
+
+  // Time window & anchors (same as buildBalanceStory)
+  let T0 = storyT0 || (rows.length ? tsToUtcString(Math.min(...rows.map(r=>r.ts))) : "");
+  let T1 = storyT1 || (rows.length ? tsToUtcString(Math.max(...rows.map(r=>r.ts))) : "");
+  T0 = normalizeTimeString(T0);
+  if (T1) T1 = normalizeTimeString(T1);
+  const exclusiveStart = storyMode === "A" || storyMode === "B";
+
+  let anchorAfter: Record<string, number> | undefined;
+  let anchorBefore: Record<string, number> | undefined;
+
+  if (storyMode === "A") {
+    anchorBefore = parseBalanceRowsToMap(beforeRows);
+    const amt = Number(transferAmount) || 0;
+    anchorAfter = { ...anchorBefore };
+    anchorAfter[transferAsset] = (anchorAfter[transferAsset] || 0) + amt;
+  } else if (storyMode === "B") {
+    anchorAfter = parseBalanceRowsToMap(afterRows);
+    if (transferAmount.trim()) {
+      const amt = Number(transferAmount) || 0;
+      anchorBefore = { ...anchorAfter };
+      anchorBefore[transferAsset] = (anchorBefore[transferAsset] || 0) - amt;
+    }
+  } else {
+    anchorAfter = undefined;
+    anchorBefore = parseBalanceRowsToMap(fromRows);
+    if (!storyT1) T1 = rows.length ? tsToUtcString(Math.max(...rows.map(r=>r.ts))) : T1;
+    if (!storyT0) T0 = rows.length ? tsToUtcString(Math.min(...rows.map(r=>r.ts))) : T0;
+  }
+
+  const windowRows = filterRowsInRangeUTC(rows, T0, T1, exclusiveStart);
+
+  // What we’ll surface (same aggregations used everywhere in the app)
+  const cats = sumByTypeAndAsset(windowRows);
+
+  // Narration builder
+  const L: string[] = [];
+
+  // Opening
+  if (storyMode === "A") {
+    const amt = Number(transferAmount) || 0;
+    L.push(`Let me walk you through what happened on your Futures wallet.`);
+    L.push(
+      `📌 On ${T0} (UTC+0), you transferred ${fmtAbs(amt)} ${transferAsset} ${amt >= 0 ? "into" : "from"} your Futures wallet.`
+    );
+    if (anchorBefore && anchorAfter) {
+      const bef = mapToPrettyList(anchorBefore);
+      const aft = mapToPrettyList(anchorAfter);
+      if (bef !== "—" || aft !== "—") {
+        L.push(`At that time, your balances changed from:`);
+        if (bef !== "—") L.push(`• Before: ${bef}`);
+        if (aft !== "—") L.push(`• After: ${aft}`);
+      }
+    }
+    L.push("");
+    L.push(`What happened after that:`);
+  } else if (storyMode === "B") {
+    L.push(`Here’s a clear rundown of your Futures activity.`);
+    L.push(`📌 Snapshot at ${T0} (UTC+0):`);
+    if (anchorAfter && mapToPrettyList(anchorAfter) !== "—") {
+      L.push(`• Wallet after snapshot: ${mapToPrettyList(anchorAfter)}`);
+    }
+    if (anchorBefore && mapToPrettyList(anchorBefore) !== "—") {
+      L.push(`• Inferred before (from the transfer you entered): ${mapToPrettyList(anchorBefore)}`);
+    }
+    L.push("");
+    L.push(`What followed:`);
+  } else {
+    L.push(`Here’s what happened between ${T0} and ${T1} (UTC+0):`);
+  }
+
+  // Helper to add a soft, plain-English line per category
+  const addIfAny = (
+    title: string,
+    m: Record<string, { pos: number; neg: number; net: number }>,
+    friendly: (asset: string, v: { pos: number; neg: number; net: number }) => string | null
+  ) => {
+    const assets = Object.keys(m).filter(a => gt(m[a].pos) || gt(m[a].neg) || gt(m[a].net));
+    if (!assets.length) return;
+    const lines: string[] = [];
+    assets.sort().forEach(a => {
+      const ln = friendly(a, m[a]);
+      if (ln) lines.push(ln);
+    });
+    if (lines.length) {
+      if (title) L.push(title);
+      lines.forEach(s => L.push(`• ${s}`));
+      L.push("");
+    }
+  };
+
+  addIfAny("", cats.realized, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      // Net realized = pos - neg
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `You earned ${fmtAbs(net)} ${a} from closed trades.`
+        : `Your closed trades reduced your balance by ${fmtAbs(-net)} ${a}.`;
+    }
+    return null;
+  });
+
+  addIfAny("", cats.commission, (a, v) => {
+    if (gt(v.neg) || gt(v.pos)) {
+      const feeNet = v.pos - v.neg;
+      if (gt(v.neg)) return `You paid ${fmtAbs(v.neg)} ${a} in trading fees.`;
+      if (feeNet > 0) return `You received ${fmtAbs(feeNet)} ${a} in fee refunds.`;
+    }
+    return null;
+  });
+
+  addIfAny("", cats.funding, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `Funding was a net gain of ${fmtAbs(net)} ${a}.`
+        : `Funding was a net cost of ${fmtAbs(-net)} ${a}.`;
+    }
+    return null;
+  });
+
+  addIfAny("", cats.insurance, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `You received ${fmtAbs(net)} ${a} in insurance-related adjustments.`
+        : `You paid ${fmtAbs(-net)} ${a} in liquidation/insurance adjustments.`;
+    }
+    return null;
+  });
+
+  addIfAny("", cats.transferGen, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `Transfers increased your ${a} by ${fmtAbs(net)}.`
+        : `Transfers reduced your ${a} by ${fmtAbs(-net)}.`;
+    }
+    return null;
+  });
+
+  if (includeGridbot) {
+    addIfAny("", cats.gridbot, (a, v) => {
+      if (gt(v.pos) || gt(v.neg)) {
+        const net = v.pos - v.neg;
+        return net >= 0
+          ? `GridBot wallet transfers added ${fmtAbs(net)} ${a}.`
+          : `GridBot wallet transfers used ${fmtAbs(-net)} ${a}.`;
+      }
+      return null;
+    });
+  }
+
+  addIfAny("", cats.coinSwap, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `Coin Swaps increased your ${a} by ${fmtAbs(net)}.`
+        : `Coin Swaps decreased your ${a} by ${fmtAbs(-net)} (converted to other coins).`;
+    }
+    return null;
+  });
+
+  addIfAny("", cats.autoEx, (a, v) => {
+    if (gt(v.pos) || gt(v.neg)) {
+      const net = v.pos - v.neg;
+      return net >= 0
+        ? `Auto-Exchange added ${fmtAbs(net)} ${a}.`
+        : `Auto-Exchange used ${fmtAbs(-net)} ${a}.`;
+    }
+    return null;
+  });
+
+  // Events: always listed but explained simply
+  const note = includeEvents ? "" : " (not included in balance math)";
+  addIfAny(`Event Contracts${note}:`, cats.eventPayouts, (a, v) => {
+    const p = cats.eventPayouts[a]?.pos || 0;
+    const o = cats.eventOrders[a]?.neg || 0;
+    if (gt(p) || gt(o)) {
+      const net = (cats.eventPayouts[a]?.net || 0) + (cats.eventOrders[a]?.net || 0);
+      return net >= 0
+        ? `Event payouts added ${fmtAbs(net)} ${a}.`
+        : `Event participation cost ${fmtAbs(-net)} ${a}.`;
+    }
+    return null;
+  });
+
+  // Other types
+  Object.keys(cats.otherNonEvent).sort().forEach(t => {
+    addIfAny("", cats.otherNonEvent[t], (a, v) => {
+      const net = v.pos - v.neg;
+      if (gt(net)) return `${friendlyTypeName(t)} added ${fmtAbs(net)} ${a}.`;
+      if (gt(-net)) return `${friendlyTypeName(t)} used ${fmtAbs(-net)} ${a}.`;
+      return null;
+    });
+  });
+
+  // Closing (no balances math here to keep it light & friendly)
+  L.push(`If you’d like, I can also share a more detailed, professional summary.`);
+
+  return L.join("\n");
+}
+
+/**
+ * Professional, concise version for agents.
+ * Clear sections, explicit nets, still human but more formal.
+ */
+function buildStoryProfessional(): string {
+  if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
+
+  let T0 = storyT0 || (rows.length ? tsToUtcString(Math.min(...rows.map(r=>r.ts))) : "");
+  let T1 = storyT1 || (rows.length ? tsToUtcString(Math.max(...rows.map(r=>r.ts))) : "");
+  T0 = normalizeTimeString(T0);
+  if (T1) T1 = normalizeTimeString(T1);
+  const exclusiveStart = storyMode === "A" || storyMode === "B";
+
+  let anchorAfter: Record<string, number> | undefined;
+  let anchorBefore: Record<string, number> | undefined;
+
+  if (storyMode === "A") {
+    anchorBefore = parseBalanceRowsToMap(beforeRows);
+    const amt = Number(transferAmount) || 0;
+    anchorAfter = { ...anchorBefore };
+    anchorAfter[transferAsset] = (anchorAfter[transferAsset] || 0) + amt;
+  } else if (storyMode === "B") {
+    anchorAfter = parseBalanceRowsToMap(afterRows);
+    if (transferAmount.trim()) {
+      const amt = Number(transferAmount) || 0;
+      anchorBefore = { ...anchorAfter };
+      anchorBefore[transferAsset] = (anchorBefore[transferAsset] || 0) - amt;
+    }
+  } else {
+    anchorAfter = undefined;
+    anchorBefore = parseBalanceRowsToMap(fromRows);
+    if (!storyT1) T1 = rows.length ? tsToUtcString(Math.max(...rows.map(r=>r.ts))) : T1;
+    if (!storyT0) T0 = rows.length ? tsToUtcString(Math.min(...rows.map(r=>r.ts))) : T0;
+  }
+
+  const windowRows = filterRowsInRangeUTC(rows, T0, T1, exclusiveStart);
+  const catsDisplay = sumByTypeAndAsset(windowRows);
+
+  const parts: string[] = [];
+  parts.push(`Scope: ${T0}${T1 ? " → " + T1 : ""} (UTC+0).`);
+
+  if (storyMode === "A") {
+    const amt = Number(transferAmount) || 0;
+    parts.push(`Anchor: transfer ${fmtSigned(amt)} ${transferAsset} at ${T0} (UTC+0).`);
+    if (anchorBefore && Object.keys(anchorBefore).length) parts.push(`Balances at anchor (before): ${mapToPrettyList(anchorBefore)}`);
+    if (anchorAfter  && Object.keys(anchorAfter ).length) parts.push(`Balances at anchor (after): ${mapToPrettyList(anchorAfter)}`);
+  } else if (storyMode === "B") {
+    parts.push(`Anchor: after-snapshot at ${T0} (UTC+0).`);
+    if (anchorAfter && Object.keys(anchorAfter).length) parts.push(`Balances (after): ${mapToPrettyList(anchorAfter)}`);
+    if (anchorBefore && Object.keys(anchorBefore).length) parts.push(`Inferred balances (before): ${mapToPrettyList(anchorBefore)}`);
+  } else if (storyMode === "C") {
+    if (anchorBefore && Object.keys(anchorBefore).length) parts.push(`Provided balances at start: ${mapToPrettyList(anchorBefore)}`);
+  }
+
+  const addSection = (title: string, m: Record<string, { pos: number; neg: number; net: number }>) => {
+    const keys = Object.keys(m).filter(a => gt(m[a].pos) || gt(m[a].neg) || gt(m[a].net));
+    if (!keys.length) return;
+    parts.push(`\n${title}:`);
+    keys.sort().forEach(a => {
+      const v = m[a];
+      const net = v.pos - v.neg;
+      const bits: string[] = [];
+      if (gt(v.pos)) bits.push(`inflows +${fmtAbs(v.pos)}`);
+      if (gt(v.neg)) bits.push(`outflows −${fmtAbs(v.neg)}`);
+      if (gt(net))  bits.push(`net ${fmtSigned(net)}`);
+      parts.push(`• ${a}: ${bits.join(" | ")}`);
+    });
+  };
+
+  addSection("Realized PnL", catsDisplay.realized);
+  addSection("Trading Fees / Commission", catsDisplay.commission);
+  addSection("Funding", catsDisplay.funding);
+  addSection("Insurance / Liquidation", catsDisplay.insurance);
+  addSection("Transfers (General)", catsDisplay.transferGen);
+  if (includeGridbot) addSection("Futures GridBot Transfers", catsDisplay.gridbot);
+  addSection("Coin Swaps", catsDisplay.coinSwap);
+  addSection("Auto-Exchange", catsDisplay.autoEx);
+
+  const eventNote = includeEvents ? "" : " (not included in balance math)";
+  addSection(`Event Contracts — Payouts${eventNote}`, catsDisplay.eventPayouts);
+  addSection(`Event Contracts — Orders${eventNote}`, catsDisplay.eventOrders);
+
+  Object.keys(catsDisplay.otherNonEvent).sort().forEach(t => {
+    addSection(`Other — ${friendlyTypeName(t)}`, catsDisplay.otherNonEvent[t]);
+  });
+
+  return parts.join("\n");
 }
 
   return (
@@ -1926,14 +2222,47 @@ export default function App() {
         </div>
       )}
 
-     {/* Balance Story preview modal (User + Agent) */}
-{storyPreviewOpen && (
+     {storyPreviewOpen && (
   <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
     <div className="modal">
       <div className="modal-head">
-        <h3>Balance Story — User &amp; Agent Responses</h3>
+        <h3>Balance Story — Preview &amp; Edit</h3>
         <button className="btn" onClick={() => setStoryPreviewOpen(false)}>Close</button>
       </div>
+
+      {/* Tabs for the two styles */}
+      <div className="btn-row" style={{marginBottom:8}}>
+        <button className="btn btn-dark" onClick={()=>{
+          setStoryText(buildStoryFriendly());
+          (document.getElementById("respLabel") as HTMLDivElement)!.innerText = "User Response (friendly)";
+        }}>User Response (friendly)</button>
+
+        <button className="btn" onClick={()=>{
+          setStoryText(buildStoryProfessional());
+          (document.getElementById("respLabel") as HTMLDivElement)!.innerText = "Agent Response (professional)";
+        }}>Agent Response (professional)</button>
+      </div>
+
+      <div className="card-head" style={{marginTop:4}}>
+        <div id="respLabel" className="bold">User Response (friendly)</div>
+      </div>
+
+      <textarea
+        className="modal-text"
+        value={storyText}
+        onChange={(e) => setStoryText(e.target.value)}
+      />
+
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        <button className="btn btn-success" onClick={() => copyText(storyText)}>Copy</button>
+        <button className="btn" onClick={() => setStoryText(buildStoryFriendly())}>Rebuild Friendly</button>
+        <button className="btn" onClick={() => setStoryText(buildStoryProfessional())}>Rebuild Professional</button>
+      </div>
+
+      <p className="hint">All times are UTC+0. You can switch tabs, edit the text, and copy.</p>
+    </div>
+  </div>
+)}
 
       {/* User Response (friendly) */}
       <div className="subcard" style={{ marginBottom: 10 }}>
