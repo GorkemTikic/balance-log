@@ -1,16 +1,12 @@
-// src/components/OtherTypesBlock.tsx
 import React from "react";
 import { Row } from "../lib/types";
 import { sumByAsset } from "../lib/aggregation";
-import { fmtAbs, fmtSigned, friendlyTypeName, gt } from "../lib/utils";
+import { fmtAbs, fmtSigned, gt } from "../lib/number";
+import { friendlyTypeName } from "../lib/utils";
 
 export default function OtherTypesBlock({ rows }: { rows: Row[] }) {
   const byType = new Map<string, Row[]>();
-  rows.forEach((r) => {
-    const g = byType.get(r.type) || [];
-    g.push(r);
-    byType.set(r.type, g);
-  });
+  rows.forEach((r) => (byType.get(r.type) || byType.set(r.type, []).get(r.type)!).push(r));
   const keys = Array.from(byType.keys()).sort();
 
   return (
