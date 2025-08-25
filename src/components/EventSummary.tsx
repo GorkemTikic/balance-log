@@ -1,8 +1,7 @@
-// src/components/EventSummary.tsx
 import React from "react";
 import { Row, TYPE } from "../lib/types";
 import { sumByAsset } from "../lib/aggregation";
-import { fmtAbs, fmtSigned } from "../lib/utils";
+import { fmtAbs, fmtSigned } from "../lib/number";
 
 export default function EventSummary({ rows }: { rows: Row[] }) {
   const orders = rows.filter((r) => r.type === TYPE.EVENT_ORDER);
@@ -16,14 +15,7 @@ export default function EventSummary({ rows }: { rows: Row[] }) {
   return (
     <div className="tablewrap">
       <table className="table">
-        <thead>
-          <tr>
-            <th>Asset</th>
-            <th>Payout (Received)</th>
-            <th>Orders (Paid)</th>
-            <th>Net</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Asset</th><th>Payout (Received)</th><th>Orders (Paid)</th><th>Net</th></tr></thead>
         <tbody>
           {assets.map((asset) => {
             const p = byPayout[asset] || { pos: 0, neg: 0, net: 0 };
