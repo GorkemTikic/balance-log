@@ -1,34 +1,59 @@
-// src/components/Modals.tsx
 import React from "react";
 
-export function FullTextModal({
-  title,
-  text,
-  onChange,
-  onClose,
-  onCopy,
-  onReset,
+export function FullResponseModal({
+  open, text, onChange, onClose, onCopy, onReset, hint,
 }: {
-  title: string;
+  open: boolean;
   text: string;
-  onChange: (v: string) => void;
+  hint?: string;
+  onChange: (s: string) => void;
   onClose: () => void;
   onCopy: () => void;
-  onReset?: () => void;
+  onReset: () => void;
 }) {
+  if (!open) return null;
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="overlay" role="dialog" aria-modal="true" aria-label="Full response preview">
       <div className="modal">
         <div className="modal-head">
-          <h3>{title}</h3>
+          <h3>Copy Response (Full) — Preview &amp; Edit</h3>
           <button className="btn" onClick={onClose}>Close</button>
         </div>
-        <textarea className="modal-text" value={text} onChange={(e) => onChange(e.target.value)} />
+        <textarea className="modal-text" value={text} onChange={(e)=>onChange(e.target.value)} />
         <div className="btn-row" style={{ marginTop: 8 }}>
-          <button className="btn btn-success" onClick={onCopy}>Copy</button>
-          {onReset && <button className="btn" onClick={onReset}>Reset</button>}
+          <button className="btn btn-success" onClick={onCopy}>Copy Edited Text</button>
+          <button className="btn" onClick={onReset}>Reset to Auto Text</button>
         </div>
-        <p className="hint">All times are UTC+0.</p>
+        {hint ? <p className="hint">{hint}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+export function StoryModal({
+  open, text, onChange, onClose, onCopy, onRebuild,
+}: {
+  open: boolean;
+  text: string;
+  onChange: (s: string) => void;
+  onClose: () => void;
+  onCopy: () => void;
+  onRebuild: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
+      <div className="modal">
+        <div className="modal-head">
+          <h3>Balance Story — Preview &amp; Edit</h3>
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+        <textarea className="modal-text" value={text} onChange={(e)=>onChange(e.target.value)} />
+        <div className="btn-row" style={{ marginTop: 8 }}>
+          <button className="btn btn-success" onClick={onCopy}>Copy Balance Story</button>
+          <button className="btn" onClick={onRebuild}>Rebuild</button>
+        </div>
+        <p className="hint">All times are UTC+0. Zero-suppression (EPS = 1e-12) applies to the text only.</p>
       </div>
     </div>
   );
