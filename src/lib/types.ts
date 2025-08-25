@@ -1,0 +1,61 @@
+// src/lib/types.ts
+export type Row = {
+  id: string;
+  uid: string;
+  asset: string;
+  type: string;
+  amount: number;
+  time: string; // "YYYY-MM-DD HH:MM:SS" UTC+0
+  ts: number;   // epoch ms (UTC)
+  symbol: string;
+  extra: string;
+  raw: string;
+};
+
+export const TYPE = {
+  REALIZED_PNL: "REALIZED_PNL",
+  FUNDING_FEE: "FUNDING_FEE",
+  COMMISSION: "COMMISSION",
+  INSURANCE_CLEAR: "INSURANCE_CLEAR",
+  LIQUIDATION_FEE: "LIQUIDATION_FEE",
+  REFERRAL_KICKBACK: "REFERRAL_KICKBACK",
+  TRANSFER: "TRANSFER",
+  GRIDBOT_TRANSFER: "STRATEGY_UMFUTURES_TRANSFER",
+  COIN_SWAP_DEPOSIT: "COIN_SWAP_DEPOSIT",
+  COIN_SWAP_WITHDRAW: "COIN_SWAP_WITHDRAW",
+  AUTO_EXCHANGE: "AUTO_EXCHANGE",
+  EVENT_ORDER: "EVENT_CONTRACTS_ORDER",
+  EVENT_PAYOUT: "EVENT_CONTRACTS_PAYOUT",
+} as const;
+
+export const EVENT_PREFIX = "EVENT_CONTRACTS_";
+export const EVENT_KNOWN_CORE = new Set([
+  TYPE.EVENT_ORDER,
+  TYPE.EVENT_PAYOUT,
+]);
+
+export const KNOWN_TYPES = new Set<string>([
+  TYPE.REALIZED_PNL,
+  TYPE.FUNDING_FEE,
+  TYPE.COMMISSION,
+  TYPE.INSURANCE_CLEAR,
+  TYPE.LIQUIDATION_FEE,
+  TYPE.REFERRAL_KICKBACK,
+  TYPE.TRANSFER,
+  TYPE.GRIDBOT_TRANSFER,
+  TYPE.COIN_SWAP_DEPOSIT,
+  TYPE.COIN_SWAP_WITHDRAW,
+  TYPE.AUTO_EXCHANGE,
+  TYPE.EVENT_ORDER,
+  TYPE.EVENT_PAYOUT,
+]);
+
+export const EPS = 1e-12;
+export const SPLIT_W = 12;
+
+export const ALL_ASSETS = ["BTC","LDUSDT","BFUSD","FDUSD","BNB","ETH","USDT","USDC","BNFCR"] as const;
+export type AssetCode = typeof ALL_ASSETS[number];
+
+export type BalanceRow = { asset: AssetCode; amount: string };
+
+export type SwapKind = "COIN_SWAP" | "AUTO_EXCHANGE";
