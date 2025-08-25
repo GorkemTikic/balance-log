@@ -1,4 +1,4 @@
-name: Deploy React app to GitHub Pages
+name: Deploy to GitHub Pages
 
 on:
   push:
@@ -25,41 +25,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
-      - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm i --no-audit --no-fund
-          fi
+      - name: Install
+        run: npm ci
 
       - name: Build
         run: npm run build
 
-      - name: Detect output directory
-        id: detect
-        run: |
-          if [ -d dist ]; then
-            echo "out=dist" >> $GITHUB_OUTPUT
-          elif [ -d build ]; then
-            echo "out=build" >> $GITHUB_OUTPUT
-          else
-            echo "No dist/ or build/ folder produced by 'npm run build'"; exit 1
-          fi
-
-      - name: SPA fallback (optional)
-        run: |
-          OUT="${{ steps.detect.outputs.out }}"
-          if [ -f "$OUT/index.html" ]; then cp "$OUT/index.html" "$OUT/404.html"; fi
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ steps.detect.outputs.out }}
+          path: dist
 
   deploy:
     needs: build
