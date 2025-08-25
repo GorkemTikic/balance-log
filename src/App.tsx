@@ -736,7 +736,8 @@ export default function App() {
   const [includeGridbot, setIncludeGridbot] = useState<boolean>(() => localStorage.getItem("storyIncGridbot") !== "0");
 
   const [storyPreviewOpen, setStoryPreviewOpen] = useState(false);
-  const [storyText, setStoryText] = useState("");
+  const [storyTextUser, setStoryTextUser] = useState("");
+  const [storyTextAgent, setStoryTextAgent] = useState("");
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rightPct, setRightPct] = useState<number>(() => {
@@ -1107,8 +1108,132 @@ export default function App() {
   }, [storyMode, beforeRows, transferAsset, transferAmount]);
 
   /* ---------- Balance Story generator ---------- */
-  function buildBalanceStory(): string {
-    if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
+  function buildBalanceStoryAgent(): string {
+  if (!rows.length) return "No parsed rows yet. Paste & Parse first.";
+
+  const L: string[] = [];
+  L.push("Futures Wallet Activity Report (UTC+0)", "");
+
+  // Anchor section (what the user set in the drawer)
+  const anchor: string[] = [];
+  const T0 = storyT0 || (minTime || "");
+  const T1 = storyT1 || (maxTime || "");
+  if (storyMode === "A") {
+    const amt = Number(transferAmount) || 0;
+    anchor.push(`Anchor (Mode A) — ${T0 || "N/A"}: Transfer ${amt >= 0 ? "+" : ""}${fmtAbs(amt)} ${transferAsset}.`);
+  } else if (storyMode === "B") {
+    anchor.push(`Anchor (Mode B) — AFTER snapshot at ${T0 || "N/A"}.`);
+  } else {
+    anchor.push(`Window (Mode C) — ${T0 || "N/A"} to ${T1 || "N/A"}.`);
+  }
+  L.push(...anchor, "");
+
+  // Trading
+  const realizedKeys = Object.keys(realizedByAsset);
+  if (realizedKeys.length) {
+    const net = realizedKeys.reduce((s, a) => s + (realizedByAsset[a].net || 0), 0);
+    L.push("Trading Results");
+    L.push(`• Net realized PnL: ${fmtSigned(net)} (across ${realizedKeys.length} asset${realizedKeys.length > 1 ? "s" : ""}).`);
+    L.push("");
+  }
+
+  // Fees
+  const commKeys = Object.keys(commissionByAsset);
+  if (commKeys.length) {
+    const fees = commKeys.reduce((s, a) => s + (commissionByAsset[a].neg || 0) - (commissionByAsset[a].pos || 0), 0);
+    L.push("Trading Fees");
+    L.push(`• Execution fees: −${fmtAbs(Math.max(0, fees))} (net).`);
+    L.push("");
+  }
+
+  // Funding
+  const fKeys = Object.keys(fundingByAsset);
+  if (fKeys.length) {
+    const received = fKeys.reduce((s, a) => s + (fundingByAsset[a].pos || 0), 0);
+    const paid = fKeys.reduce((s, a) => s + (fundingByAsset[a].neg || 0), 0);
+    const net = received - paid;
+    L.push("Funding");
+    L.push(`• Received: +${fmtAbs(received)} • Paid: −${fmtAbs(paid)} • Net: ${fmtSigned(net)}`);
+    L.push("");
+  }
+
+  // Insurance / Liquidation
+  const iKeys = Object.keys(insuranceByAsset);
+  if (iKeys.length) {
+    const pos = iKeys.reduce((s, a) => s + (insuranceByAsset[a].pos || 0), 0);
+    const neg = iKeys.reduce((s, a) => s + (insuranceByAsset[a].neg || 0), 0);
+    const net = pos - neg;
+    L.push("Insurance & Liquidation");
+    L.push(`• Credits: +${fmtAbs(pos)} • Charges: −${fmtAbs(neg)} • Net: ${fmtSigned(net)}`);
+    L.push("");
+  }
+
+  // Transfers
+  const tKeys = Object.keys(transfersByAsset);
+  const gKeys = Object.keys(gridbotByAsset);
+  if (tKeys.length || gKeys.length) {
+    L.push("Transfers");
+    if (tKeys.length) {
+      const net = tKeys.reduce((s, a) => s + (transfersByAsset[a].net || 0), 0);
+      L.push(`• Wallet transfers (net): ${fmtSigned(net)}`);
+    }
+    if (gKeys.length) {
+      const net = gKeys.reduce((s, a) => s + (gridbotByAsset[a].net || 0), 0);
+      L.push(`• GridBot Wallet (net): ${fmtSigned(net)}`);
+    }
+    L.push("");
+  }
+
+  // Conversions
+  const csKeys = Object.keys(coinSwapAggByAsset);
+  const aeKeys = Object.keys(autoExAggByAsset);
+  if (csKeys.length || aeKeys.length) {
+    L.push("Conversions");
+    if (csKeys.length) {
+      const netUSDT = (coinSwapAggByAsset["USDT"]?.net || 0);
+      L.push(`• Coin Swaps: USDT net ${fmtSigned(netUSDT)} (other assets offset accordingly).`);
+    }
+    if (aeKeys.length) {
+      const netAE = aeKeys.reduce((s, a) => s + (autoExAggByAsset[a].net || 0), 0);
+      L.push(`• Auto-Exchange adjustments: ${fmtSigned(netAE)}`);
+    }
+    L.push("");
+  }
+
+  // Event contracts
+  const eAssets = Array.from(new Set([...Object.keys(eventsOrderByAsset), ...Object.keys(eventsPayoutByAsset)]));
+  if (eAssets.length) {
+    const payout = eAssets.reduce((s, a) => s + (eventsPayoutByAsset[a]?.pos || 0), 0);
+    const orders = eAssets.reduce((s, a) => s + (eventsOrderByAsset[a]?.neg || 0), 0);
+    const net = payout - orders;
+    L.push("Event Contracts");
+    L.push(`• Payouts: +${fmtAbs(payout)} • Orders: −${fmtAbs(orders)} • Net: ${fmtSigned(net)}`);
+    L.push("");
+  }
+
+  // Rewards
+  const rkKeys = Object.keys(referralByAsset);
+  if (rkKeys.length) {
+    const pos = rkKeys.reduce((s, a) => s + (referralByAsset[a].pos || 0), 0);
+    L.push("Rewards");
+    L.push(`• Referral/bonuses credited: +${fmtAbs(pos)}`);
+    L.push("");
+  }
+
+  // Final balance by anchor asset
+  const nonZeroAssets = Object.keys(totalByAsset).filter((a) => gt(totalByAsset[a]));
+  if (nonZeroAssets.length) {
+    L.push("Final Balance");
+    nonZeroAssets.sort().forEach((a) => {
+      L.push(`• ${a}: ${fmtSigned(totalByAsset[a])}`);
+    });
+  } else {
+    L.push("Final Balance");
+    L.push("• No positive-ending assets.");
+  }
+
+  return L.join("\n").replace(/\n{3,}/g, "\n\n");
+}
 
     // Figure time window
     let T0 = storyT0 || minTime || "";
@@ -1290,11 +1415,13 @@ export default function App() {
     return L.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
-  function openStoryPreview() {
-    const txt = buildBalanceStory();
-    setStoryText(txt);
-    setStoryPreviewOpen(true);
-  }
+ function openStoryPreview() {
+  const userTxt = buildBalanceStoryUser();
+  const agentTxt = buildBalanceStoryAgent();
+  setStoryTextUser(userTxt);
+  setStoryTextAgent(agentTxt);
+  setStoryPreviewOpen(true);
+}
 
   return (
     <div className="wrap">
@@ -1799,36 +1926,51 @@ export default function App() {
         </div>
       )}
 
-      {/* Balance Story preview modal */}
-      {storyPreviewOpen && (
-        <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
-          <div className="modal">
-            <div className="modal-head">
-              <h3>Balance Story — Preview &amp; Edit</h3>
-              <button className="btn" onClick={() => setStoryPreviewOpen(false)}>Close</button>
-            </div>
-            <textarea
-              className="modal-text"
-              value={storyText}
-              onChange={(e) => setStoryText(e.target.value)}
-            />
-            <div className="btn-row" style={{ marginTop: 8 }}>
-              <button className="btn btn-success" onClick={() => copyText(storyText)}>
-                Copy Balance Story
-              </button>
-              <button className="btn" onClick={() => setStoryText(buildBalanceStory())}>
-                Rebuild
-              </button>
-            </div>
-            <p className="hint">
-              All times are UTC+0. Zero-suppression (EPS = 1e-12) applies to the text only.
-            </p>
+     {/* Balance Story preview modal (User + Agent) */}
+{storyPreviewOpen && (
+  <div className="overlay" role="dialog" aria-modal="true" aria-label="Balance Story preview">
+    <div className="modal">
+      <div className="modal-head">
+        <h3>Balance Story — User &amp; Agent Responses</h3>
+        <button className="btn" onClick={() => setStoryPreviewOpen(false)}>Close</button>
+      </div>
+
+      {/* User Response (friendly) */}
+      <div className="subcard" style={{ marginBottom: 10 }}>
+        <div className="card-head" style={{ marginBottom: 6 }}>
+          <h4>User Response (friendly)</h4>
+          <div className="btn-row">
+            <button className="btn btn-success" onClick={() => copyText(storyTextUser)}>Copy</button>
+            <button className="btn" onClick={() => setStoryTextUser(buildBalanceStoryUser())}>Rebuild</button>
           </div>
         </div>
-      )}
+        <textarea
+          className="modal-text"
+          value={storyTextUser}
+          onChange={(e) => setStoryTextUser(e.target.value)}
+        />
+      </div>
+
+      {/* Agent Response (professional) */}
+      <div className="subcard">
+        <div className="card-head" style={{ marginBottom: 6 }}>
+          <h4>Agent Response (professional)</h4>
+          <div className="btn-row">
+            <button className="btn btn-success" onClick={() => copyText(storyTextAgent)}>Copy</button>
+            <button className="btn" onClick={() => setStoryTextAgent(buildBalanceStoryAgent())}>Rebuild</button>
+          </div>
+        </div>
+        <textarea
+          className="modal-text"
+          value={storyTextAgent}
+          onChange={(e) => setStoryTextAgent(e.target.value)}
+        />
+      </div>
+
+      <p className="hint">Both texts are fully editable. All times are UTC+0.</p>
     </div>
-  );
-}
+  </div>
+)}
 
 /* ---------- small components ---------- */
 function EventSummary({ rows }: { rows: Row[] }) {
