@@ -1,10 +1,14 @@
 // src/components/RpnCard.tsx
 import React from "react";
-import { gt, fmtAbs, fmtSigned } from "../lib/number";
+import { fmtAbs, fmtSigned, gt } from "../lib/utils";
 
-type MapShape = Record<string, { pos: number; neg: number; net: number }>;
-
-export default function RpnCard({ title, map }: { title: string; map: MapShape }) {
+export default function RpnCard({
+  title,
+  map,
+}: {
+  title: string;
+  map: Record<string, { pos: number; neg: number; net: number }>;
+}) {
   const keys = Object.keys(map);
   return (
     <div className="card">
@@ -18,11 +22,9 @@ export default function RpnCard({ title, map }: { title: string; map: MapShape }
             const chunks: React.ReactNode[] = [];
             if (gt(v.pos)) chunks.push(<span key="p" className="num good">+{fmtAbs(v.pos)}</span>);
             if (gt(v.neg)) chunks.push(<span key="n" className="num bad">−{fmtAbs(v.neg)}</span>);
-            const netEl = gt(v.net) ? (
-              <span key="net" className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
-            ) : (
-              <span key="dash" className="num muted">–</span>
-            );
+            const netEl = gt(v.net)
+              ? <span key="net" className={`num ${v.net >= 0 ? "good" : "bad"}`}>{fmtSigned(v.net)}</span>
+              : <span key="dash" className="num muted">–</span>;
             return (
               <li key={asset} className="kv-row">
                 <span className="label">{asset}</span>
@@ -34,8 +36,4 @@ export default function RpnCard({ title, map }: { title: string; map: MapShape }
           })}
         </ul>
       ) : (
-        <p className="muted">None</p>
-      )}
-    </div>
-  );
-}
+        <p className="mu
