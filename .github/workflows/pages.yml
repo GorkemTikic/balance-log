@@ -1,14 +1,18 @@
-name: Deploy to GitHub Pages
+name: Deploy React app to GitHub Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,19 +27,46 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm i --no-audit --no-fund
+          fi
 
       - name: Build
         run: npm run build
 
-      - name: Upload dist
+      - name: Detect output directory
+        id: detect
+        run: |
+          if [ -d dist ]; then
+            echo "out=dist" >> $GITHUB_OUTPUT
+          elif [ -d build ]; then
+            echo "out=build" >> $GITHUB_OUTPUT
+          else
+            echo "No dist/ or build/ folder produced by 'npm run build'"; exit 1
+          fi
+
+      - name: SPA fallback (optional)
+        run: |
+          OUT="${{ steps.detect.outputs.out }}"
+          if [ -f "$OUT/index.html" ]; then cp "$OUT/index.html" "$OUT/404.html"; fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: ${{ steps.detect.outputs.out }}
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
