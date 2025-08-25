@@ -860,48 +860,6 @@ export default function App() {
     navigator.clipboard.writeText(text).catch(() => alert("Copy failed"));
   }
 
-  /* ---------- Copy helpers ---------- */
-  function copySummary() {
-    const L: string[] = [];
-    L.push("FD Summary (UTC+0)", "");
-    const section = (title: string, map: Record<string, { pos: number; neg: number; net?: number }>) => {
-      const keys = Object.keys(map);
-      if (keys.length) L.push(title + ":");
-      keys.forEach((asset) => {
-        const v = map[asset];
-        if (gt(v.pos)) L.push(`  Received ${asset}: +${fmtAbs(v.pos)}`);
-        if (gt(v.neg)) L.push(`  Paid ${asset}: −${fmtAbs(v.neg)}`);
-        if (typeof v.net === "number" && gt(v.net)) L.push(`  Net ${asset}: ${fmtSigned(v.net)}`);
-      });
-      if (keys.length) L.push("");
-    };
-    section("Realized PnL (Futures, not Events)", realizedByAsset);
-    section("Trading Fees / Commission", commissionByAsset);
-    section("Referral Kickback", referralByAsset);
-    section("Funding Fees", fundingByAsset);
-    section("Insurance / Liquidation", insuranceByAsset);
-    section("Transfers (General)", transfersByAsset);
-    if (Object.keys(gridbotByAsset).length) section("Futures GridBot Wallet Transfers", gridbotByAsset);
-
-    if (otherTypesNonEvent.length) {
-      const byType: Record<string, Row[]> = {};
-      otherTypesNonEvent.forEach((r) => ((byType[r.type] = byType[r.type] || []).push(r)));
-      L.push("Other Types (non-event):");
-      Object.keys(byType)
-        .sort()
-        .forEach((t) => {
-          const m = sumByAsset(byType[t]);
-          L.push(`  ${friendlyTypeName(t)}:`);
-          Object.entries(m).forEach(([asset, v]) => {
-            if (gt(v.pos)) L.push(`    Received ${asset}: +${fmtAbs(v.pos)}`);
-            if (gt(v.neg)) L.push(`    Paid ${asset}: −${fmtAbs(v.neg)}`);
-            if (gt(v.net)) L.push(`    Net ${asset}: ${fmtSigned(v.net)}`);
-          });
-        });
-    }
-    copyText(L.join("\n"));
-  }
-
   const totalByAsset = useMemo(() => {
     const totals: Record<string, number> = {};
     const bump = (map: Record<string, { net: number }>) => {
@@ -1003,7 +961,6 @@ export default function App() {
     return L.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
-  function copyFullResponse() { copyText(buildFullResponse()); }
   function openFullPreview() { setFullPreviewText(buildFullResponse()); setShowFullPreview(true); }
   function copySwaps(list: { text: string }[], title: string) {
     const L: string[] = [`${title} (UTC+0)`, ""];
@@ -1429,8 +1386,6 @@ export default function App() {
               </div>
 
               <div className="kpi-actions btn-row">
-                <button className="btn btn-success" onClick={copySummary}>Copy Summary (no Swaps)</button>
-                <button className="btn" onClick={copyFullResponse}>Copy Response (Full)</button>
                 <button className="btn" onClick={openFullPreview}>Preview/Edit Full Response</button>
                 <button className="btn btn-dark" onClick={() => setStoryOpen(true)}>Balance Story</button>
               </div>
