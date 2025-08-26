@@ -10,7 +10,7 @@ export type Row = {
   amount: number;
 };
 
-/** App'ten gelen satırlar (EVENT_CONTRACTS_* hariç) bu bileşene verilir */
+/** App'ten gelen satırlar (EVENT_CONTRACTS_* dahil/haric App.tsx karar verir) bu bileşene verilir */
 export default function SymbolTable({ rows }: { rows: Row[] }) {
   // ---- helpers ----
   const fmt = (n: number) => (Number.isFinite(n) ? n.toString() : "0");
@@ -60,7 +60,7 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
       const cMap = sumByAsset(commission);
       const iMap = sumByAsset(insurance);
 
-      // sembolde hiç anlamlı bir toplam yoksa atla
+      // hiç anlamlı toplam yoksa atla
       if (
         isEmptyMap(rMap) &&
         isEmptyMap(fMap) &&
@@ -103,8 +103,7 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
     return lines.join("\n");
   };
 
-  const buildAllText = () =>
-    blocks.map((b) => buildBlockText(b)).join("\n\n");
+  const buildAllText = () => blocks.map((b) => buildBlockText(b)).join("\n\n");
 
   async function copyAll() {
     try {
@@ -127,73 +126,130 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
     );
   }
 
+  // Kolon genişliklerini garantilemek için colgroup kullanıyoruz
+  const colStyles = {
+    sym:  { width: 140 },     // sembol sabit genişlik, nowrap
+    col:  { width: 1 },       // içerik genişledikçe büyür
+    act:  { width: 170 },     // actions sabit
+  } as const;
+
+  const renderMap = (m: Record<string, { pos: number; neg: number; net: number }>) => {
+    const keys = Object.keys(m).sort();
+    if (!keys.length) return <span className="muted">—</span>;
+    return (
+      <div style={{ display: "grid", gap: 4 }}>
+        {keys.map((k) => {
+          const v = m[k];
+          return (
+            <div key={k} className="nowrap">
+              {k}{" "}
+              <span style={{ color: "#0b7a0b" }}>+{fmt(v.pos)}</span>{" "}
+              <span style={{ color: "#a01212" }}>−{fmt(v.neg)}</span>{" "}
+              <strong>= {fmt(v.net)}</strong>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="card">
       <div className="section-head" style={{ alignItems: "center" }}>
         <h3 className="section-title">By Symbol (Futures, not Events)</h3>
         <div className="btn-row">
           {/* tüm semboller için toplu butonlar */}
-          <ExportPNG
-            text={buildAllText()}
-            fileName="symbols-all.png"
-            width={1400}
-          />
-          <button className="btn" onClick={copyAll}>
-            Copy ALL (text)
-          </button>
+          <ExportPNG text={buildAllText()} fileName="symbols-all.png" width={1400} />
+          <button className="btn" onClick={copyAll}>Copy ALL (text)</button>
         </div>
       </div>
 
-      {/* tablo */}
-      <div
-        className="tablewrap horizontal"
-        style={{ maxHeight: 520, overflow: "auto" }}
-      >
-        <table className="table mono small" style={{ minWidth: 900 }}>
+      <div className="tablewrap horizontal" style={{ maxHeight: 560, overflow: "auto" }}>
+        <table
+          className="table mono small"
+          style={{
+            width: "100%",
+            borderCollapse: "separate",
+            borderSpacing: 0,
+          }}
+        >
+          <colgroup>
+            <col style={{ width: colStyles.sym.width }} />
+            <col style={{ width: colStyles.col.width }} />
+            <col style={{ width: colStyles.col.width }} />
+            <col style={{ width: colStyles.col.width }} />
+            <col style={{ width: colStyles.act.width }} />
+          </colgroup>
+
           <thead>
             <tr>
-              <th style={{ textAlign: "left" }}>Symbol</th>
-              <th style={{ textAlign: "left" }}>Realized PnL</th>
-              <th style={{ textAlign: "left" }}>Funding</th>
-              <th style={{ textAlign: "left" }}>Trading Fees</th>
-              <th style={{ textAlign: "left" }}>Insurance / Liq.</th>
-              <th style={{ textAlign: "right" }}>Actions</th>
+              <th
+                style={{
+                  textAlign: "left",
+                  position: "sticky",
+                  top: 0,
+                  background: "#fff",
+                  zIndex: 1,
+                }}
+              >
+                Symbol
+              </th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>
+                Realized PnL
+              </th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>
+                Funding
+              </th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>
+                Trading Fees
+              </th>
+              <th style={{ textAlign: "right", position: "sticky", top: 0, background: "#fff" }}>
+                Actions
+              </th>
             </tr>
           </thead>
+
           <tbody>
-            {blocks.map((b) => {
-              const renderMap = (m: Record<string, { pos: number; neg: number; net: number }>) => {
-                const keys = Object.keys(m).sort();
-                if (!keys.length) return <span className="muted">—</span>;
-                return (
-                  <div style={{ display: "grid", gap: 4 }}>
-                    {keys.map((k) => {
-                      const v = m[k];
-                      return (
-                        <div key={k} className="nowrap">
-                          {k}{" "}
-                          <span style={{ color: "#0b7a0b" }}>+{fmt(v.pos)}</span>{" "}
-                          <span style={{ color: "#a01212" }}>−{fmt(v.neg)}</span>{" "}
-                          <strong>= {fmt(v.net)}</strong>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              };
-
+            {blocks.map((b, i) => {
               const textForRow = buildBlockText(b);
-
               return (
-                <tr key={b.symbol}>
-                  <td style={{ textAlign: "left", fontWeight: 700 }}>
+                <tr
+                  key={b.symbol}
+                  style={{
+                    background: i % 2 === 0 ? "transparent" : "#fafafa",
+                  }}
+                >
+                  <td
+                    style={{
+                      textAlign: "left",
+                      fontWeight: 700,
+                      whiteSpace: "nowrap",
+                      wordBreak: "keep-all",
+                      minWidth: colStyles.sym.width,
+                      maxWidth: colStyles.sym.width,
+                    }}
+                    title={b.symbol}
+                  >
                     {b.symbol}
                   </td>
-                  <td style={{ textAlign: "left" }}>{renderMap(b.realized)}</td>
-                  <td style={{ textAlign: "left" }}>{renderMap(b.funding)}</td>
-                  <td style={{ textAlign: "left" }}>{renderMap(b.commission)}</td>
-                  <td style={{ textAlign: "left" }}>{renderMap(b.insurance)}</td>
-                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+
+                  <td style={{ textAlign: "left", verticalAlign: "top" }}>
+                    {renderMap(b.realized)}
+                  </td>
+                  <td style={{ textAlign: "left", verticalAlign: "top" }}>
+                    {renderMap(b.funding)}
+                  </td>
+                  <td style={{ textAlign: "left", verticalAlign: "top" }}>
+                    {renderMap(b.commission)}
+                  </td>
+
+                  <td
+                    style={{
+                      textAlign: "right",
+                      whiteSpace: "nowrap",
+                      verticalAlign: "top",
+                    }}
+                  >
                     <ExportPNG
                       text={textForRow}
                       fileName={`symbol-${b.symbol}.png`}
