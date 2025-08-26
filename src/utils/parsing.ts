@@ -19,7 +19,6 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
   if (!lines.length) return { rows: [], diags: ["No non-empty lines."] };
 
   const delim = detectDelimiter(lines);
-  // If first line looks like a real header, use it; otherwise we'll guess
   const headerCells = splitCsv(lines[0], delim);
   const hasHeader = looksLikeHeader(headerCells);
 
@@ -44,8 +43,8 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
     const get = (j?: number, fallback?: number) =>
       j != null && j < cols.length ? cols[j] ?? "" : (fallback != null && fallback < cols.length ? cols[fallback] ?? "" : "");
 
-    // Heuristic fallback positions: 0..9
-    const timeStr  = (get(getIdx("time"),   5) as string).trim();   // your sample time is column 5 (0-based)
+    // Heuristic fallback positions for your sample dataset
+    const timeStr  = (get(getIdx("time"),   5) as string).trim();   // sample: time at col 5 (0-based)
     const typeStr0 = (get(getIdx("type"),   3) as string).trim();
     const assetStr = (get(getIdx("asset"),  2) as string).trim();
     const amtStr   = (get(getIdx("amount"), 4) as string).trim();
@@ -54,7 +53,6 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
     const uidStr   = (get(getIdx("uid"),    1) as string).trim();
     const extraStr = (get(getIdx("extra")) || [cols[7], cols[8], cols[9]].filter(Boolean).join(" ")).trim();
 
-    // Basic emptiness guard
     if (!timeStr && !typeStr0 && !assetStr && !amtStr) {
       diags.push(`Line ${i + 1}: skipped (empty/insufficient values)`);
       continue;
@@ -225,6 +223,13 @@ function parseAmount(s: string): number {
 }
 function isLikelyNumber(s: string) {
   return /^[-+()]?[\d\s,.'’ ]+(?:[.,]\d+)?$/.test(s);
+}
+/** NEW: used during header guessing to score which column looks like "amount" */
+function isLikelyAmountCell(s: string) {
+  if (!s) return false;
+  const t = s.trim();
+  // simple quick checks (don’t fully parse; just pattern match)
+  return /^[-+()]?[\d\s,.'’ ]+(?:[.,]\d+)?(?:\s[A-Z]{3,6})?$/.test(t);
 }
 
 /* --------- Type normalization --------- */
