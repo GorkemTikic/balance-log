@@ -1,69 +1,49 @@
-name: Deploy React app to GitHub Pages
+name: Build & Deploy
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # Resmi NPM registry'yi zorla
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
 
-      - name: Install dependencies
+      # Güvenlik taramalarını kapat, resmi registryle kurulum yap
+      - name: Install
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm i --no-audit --no-fund
-          fi
+          npm ci --no-audit --no-fund
+        env:
+          NODE_AUTH_TOKEN: ''   # Boş token; özel paket yok
 
       - name: Build
         run: npm run build
 
-      - name: Detect output directory
-        id: detect
-        run: |
-          if [ -d dist ]; then
-            echo "out=dist" >> $GITHUB_OUTPUT
-          elif [ -d build ]; then
-            echo "out=build" >> $GITHUB_OUTPUT
-          else
-            echo "No dist/ or build/ folder produced by 'npm run build'"; exit 1
-          fi
-
-      - name: SPA fallback (optional)
-        run: |
-          OUT="${{ steps.detect.outputs.out }}"
-          if [ -f "$OUT/index.html" ]; then cp "$OUT/index.html" "$OUT/404.html"; fi
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
+      # (Varsa) GitHub Pages'a deploy
+      # Statik siteyi dist/ klasörüne ürettiğimizi varsayıyorum
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ steps.detect.outputs.out }}
+          path: dist
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
