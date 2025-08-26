@@ -1,99 +1,177 @@
 // src/App.tsx
-}
-lines.push({ time: t, ts, text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}` });
-}
-lines.sort((a, b) => a.ts - b.ts);
-return lines;
-}
+import React, { useMemo, useState, useEffect } from "react";
+import GridPasteBox from "@/components/GridPasteBox";
+import RpnCard from "@/components/RpnCard";
+import FiltersBar from "@/components/FiltersBar";
+import PngExport from "@/components/PngExport";
+import { gt } from "@/lib/format"; // (opsiyonel) kullanmıyorsan bu satırı silebilirsin
 
-
-// ---- Phase 3 additions: filters & persistence ----
-const DEFAULT_FILTERS: Filters = {
-t0: "",
-t1: "",
-symbol: "",
-show: {
-realized: true,
-funding: true,
-commission: true,
-insurance: true,
-transfers: true,
-coinSwaps: true,
-autoExchange: true,
-events: true,
-},
+type Row = {
+  id: string;
+  uid: string;
+  asset: string;
+  type: string;
+  amount: number;
+  time: string;
+  ts: number;
+  symbol: string;
+  extra: string;
+  raw: string;
 };
 
+const TYPE = {
+  REALIZED_PNL: "REALIZED_PNL",
+  COMMISSION: "COMMISSION",
+  FUNDING_FEE: "FUNDING_FEE",
+  INSURANCE_CLEAR: "INSURANCE_CLEAR",
+  LIQUIDATION_FEE: "LIQUIDATION_FEE",
+  TRANSFER: "TRANSFER",
+} as const;
 
-function applyFilters(rows: Row[], f: Filters) {
-const start = f.t0 ? parseUtcMs(f.t0) : Number.NEGATIVE_INFINITY;
-const end = f.t1 ? parseUtcMs(f.t1) : Number.POSITIVE_INFINITY;
-const sym = f.symbol.trim().toUpperCase();
-const keepType = (t: string) => {
-switch (t) {
-case TYPE.REALIZED_PNL: return f.show.realized;
-case TYPE.FUNDING_FEE: return f.show.funding;
-case TYPE.COMMISSION: return f.show.commission;
-case TYPE.INSURANCE_CLEAR:
-case TYPE.LIQUIDATION_FEE: return f.show.insurance;
-case TYPE.TRANSFER: return f.show.transfers;
-case TYPE.COIN_SWAP_DEPOSIT:
-case TYPE.COIN_SWAP_WITHDRAW: return f.show.coinSwaps;
-case TYPE.AUTO_EXCHANGE: return f.show.autoExchange;
-default:
-if (t.startsWith(EVENT_PREFIX)) return f.show.events;
-return true;
-}
-};
-return rows.filter((r) => {
-if (!(r.ts >= start && r.ts <= end)) return false;
-if (sym && !(r.symbol || "").toUpperCase().includes(sym)) return false;
-if (!keepType(r.type)) return false;
-return true;
-});
+function parseBalanceLog(text: string): Row[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const out: Row[] = [];
+  lines.forEach((line) => {
+    const cols = line.split(/\t|\s{2,}|\s\|\s/);
+    if (cols.length < 6) return;
+    const [id, uid, asset, type, amtRaw, time] = cols;
+    const amt = Number(amtRaw);
+    if (Number.isNaN(amt)) return;
+    out.push({
+      id,
+      uid,
+      asset,
+      type,
+      amount: amt,
+      time,
+      ts: Date.parse(time),
+      symbol: cols[6] || "",
+      extra: cols.slice(7).join(" "),
+      raw: line,
+    });
+  });
+  return out;
 }
 
+function sumByAsset(rows: Row[]) {
+  const acc: Record<string, { pos: number; neg: number; net: number }> = {};
+  rows.forEach((r) => {
+    const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
+    if (r.amount >= 0) a.pos += r.amount;
+    else a.neg += Math.abs(r.amount);
+    a.net += r.amount;
+  });
+  return acc;
+}
 
 export default function App() {
-const [input, setInput] = useState("");
-const [rows, setRows] = useState<Row[]>([]);
-const [diags, setDiags] = useState<string[]>([]);
-const [error, setError] = useState("");
+  const [rows, setRows] = useState<Row[]>([]);
+  const [error, setError] = useState("");
 
+  const [filterSymbol, setFilterSymbol] = useState(
+    localStorage.getItem("filterSymbol") || ""
+  );
+  const [filterT0, setFilterT0] = useState(
+    localStorage.getItem("filterT0") || ""
+  );
+  const [filterT1, setFilterT1] = useState(
+    localStorage.getItem("filterT1") || ""
+  );
 
-const [filters, setFilters] = useLocalStorage<Filters>("bl.filters.v1", DEFAULT_FILTERS);
+  useEffect(() => {
+    localStorage.setItem("filterSymbol", filterSymbol);
+  }, [filterSymbol]);
+  useEffect(() => {
+    localStorage.setItem("filterT0", filterT0);
+  }, [filterT0]);
+  useEffect(() => {
+    localStorage.setItem("filterT1", filterT1);
+  }, [filterT1]);
 
+  function runParse(tsv: string) {
+    try {
+      const rs = parseBalanceLog(tsv);
+      setRows(rs);
+      setError(rs.length ? "" : "No valid rows");
+    } catch (e: any) {
+      setError(e.message || String(e));
+      setRows([]);
+    }
+  }
 
-const [storyOpen, setStoryOpen] = useLocalStorage<boolean>("bl.story.open", false);
-const [storyT0, setStoryT0] = useLocalStorage<string>("bl.story.t0", "");
-const [storyT1, setStoryT1] = useLocalStorage<string>("bl.story.t1", "");
+  const filtered = useMemo(() => {
+    return rows.filter((r) => {
+      if (filterSymbol && r.symbol !== filterSymbol) return false; // tam eşleşme; istersen includes() yapabiliriz
+      if (filterT0 && r.ts < Date.parse(filterT0)) return false;
+      if (filterT1 && r.ts > Date.parse(filterT1)) return false;
+      return true;
+    });
+  }, [rows, filterSymbol, filterT0, filterT1]);
 
+  const realizedByAsset = useMemo(
+    () => sumByAsset(filtered.filter((r) => r.type === TYPE.REALIZED_PNL)),
+    [filtered]
+  );
+  const commissionByAsset = useMemo(
+    () => sumByAsset(filtered.filter((r) => r.type === TYPE.COMMISSION)),
+    [filtered]
+  );
+  const fundingByAsset = useMemo(
+    () => sumByAsset(filtered.filter((r) => r.type === TYPE.FUNDING_FEE)),
+    [filtered]
+  );
+  const insuranceByAsset = useMemo(
+    () =>
+      sumByAsset(
+        filtered.filter(
+          (r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE
+        )
+      ),
+    [filtered]
+  );
+  const transfersByAsset = useMemo(
+    () => sumByAsset(filtered.filter((r) => r.type === TYPE.TRANSFER)),
+    [filtered]
+  );
 
-// Parse
-function runParse(tsv: string) {
-setError("");
-try {
-const { rows: rs, diags } = parseBalanceLog(tsv);
-if (!rs.length) throw new Error("No valid rows detected.");
-setRows(rs);
-setDiags(diags);
-} catch (e: any) {
-setError(e?.message || String(e));
-setRows([]);
-setDiags([]);
-}
-}
-function onPasteAndParseText() {
-if (navigator.clipboard?.readText) {
-navigator.clipboard.readText().then((t) => {
-setInput(t);
-setTimeout(() => runParse(t), 0);
-});
-}
-}
+  return (
+    <div className="container" id="app-root">
+      <header className="header">
+        <div>
+          <h1 className="title">Balance Log Analyzer</h1>
+          <div className="subtitle">Phase 3 — Filters & PNG Export</div>
+        </div>
+        <div className="toolbar">
+          <PngExport targetId="app-root" />
+        </div>
+      </header>
 
+      <FiltersBar
+        symbolFilter={filterSymbol}
+        setSymbolFilter={setFilterSymbol}
+        date0={filterT0}
+        setDate0={setFilterT0}
+        date1={filterT1}
+        setDate1={setFilterT1}
+      />
 
-// Derived (apply filters first)
-const filteredRows = useMemo(() => applyFilters(rows, filters), [rows, filters]);
-const nonEvent = useMemo(() => onlyNonEvents(filteredRows), [filteredRows]);
+      <section className="space">
+        <GridPasteBox onUseTSV={runParse} onError={setError} />
+        {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
+      </section>
+
+      {!!filtered.length && (
+        <section className="grid-2" style={{ marginTop: 16 }}>
+          <RpnCard title="Realized PnL" map={realizedByAsset} />
+          <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+          <RpnCard title="Funding Fees" map={fundingByAsset} />
+          <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+          <RpnCard title="Transfers (General)" map={transfersByAsset} />
+        </section>
+      )}
+    </div>
+  );
 }
