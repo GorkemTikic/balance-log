@@ -196,3 +196,53 @@ input.btn::placeholder{ color:#a0aec0; }
 
 /* SymbolTable satırları: okunabilirlik */
 .table tr:nth-child(even) { background: #fafafa; }
+
+/* ====== new: no-wrap helper ====== */
+.nowrap { white-space: nowrap; }
+
+/* ====== new: KPI row ====== */
+.kpi-row{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+@media (max-width: 900px){ .kpi-row{ grid-template-columns: 1fr; } }
+
+.kpi{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+.kpi-label{ font-size: 12px; color: var(--muted); }
+.kpi-value{ font-size: 18px; font-weight: 800; margin-top: 4px; }
+
+/* ====== new: Tabs ====== */
+.tabs{
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 6px;
+  flex-wrap: wrap;
+}
+.tab{
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+}
+.tab.active{
+  background: #111827;
+  border-color: #111827;
+  color: #fff;
+}
+
+/* ====== new: horizontal scroll table (no truncation) ====== */
+.tablewrap.horizontal{
+  overflow-x: auto;
+}
+.tablewrap.horizontal .table{
+  min-width: 520px; /* let content breathe; prevents cramping */
+}
