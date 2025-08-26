@@ -22,21 +22,25 @@ export default function App(){
 
   const [storyOpen, setStoryOpen] = useState(false);
 
-  // parse actions
+  /** Parse actions */
   function runParse(text: string){
     setError("");
     try{
       const { rows: rs, diags } = parseBalanceLog(text);
       setRows(rs);
       setDiags(diags);
-      if (rs.length) setActive("summary");
+      setActive(rs.length ? "summary" : "raw");
     }catch(e:any){
       setRows([]); setDiags([]); setError(e?.message || String(e));
+      setActive("raw");
     }
   }
   function onParse(){ runParse(input); }
   function onPasteFromClipboard(){
-    (navigator as any).clipboard?.readText?.().then((t:string)=>{ setInput(t); setTimeout(()=>runParse(t), 0); });
+    // some browsers don’t allow readText without user gesture; we still try gracefully
+    (navigator as any).clipboard?.readText?.()
+      .then((t:string)=>{ setInput(t); setTimeout(()=>runParse(t), 0); })
+      .catch(()=> alert("Clipboard read failed. Paste manually into the box, then click ‘Use & Parse’."));
   }
 
   // slices
@@ -74,6 +78,24 @@ export default function App(){
     window.addEventListener("mouseup", onUp);
     return ()=>{ window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, [drag]);
+
+  /** Empty-state banner if nothing parsed */
+  const EmptyBanner = rows.length ? null : (
+    <div className="panel" style={{borderColor:"#3b425c"}}>
+      <div className="panel-head"><h3 style={{margin:0}}>No rows parsed yet</h3></div>
+      <ol style={{marginTop:6, color:"#9db0d4"}}>
+        <li>Export CSV (or copy as table) from your exchange’s balance log.</li>
+        <li>Paste into the box above (TSV/CSV accepted; headers optional).</li>
+        <li>Click <b>Use & Parse</b> or <b>Paste & Parse</b>.</li>
+      </ol>
+      {!!diags.length && (
+        <>
+          <div className="panel-head" style={{marginTop:8}}><strong>Diagnostics:</strong></div>
+          <pre className="modal-text" style={{height:140}}>{diags.join("\n")}</pre>
+        </>
+      )}
+    </div>
+  );
 
   return (
     <div className="wrap">
@@ -122,8 +144,11 @@ export default function App(){
           ))}
         </nav>
 
+        {/* If nothing parsed, show helpful banner */}
+        {!rows.length && EmptyBanner}
+
         {/* SUMMARY TAB */}
-        {active==="summary" && (
+        {rows.length > 0 && active==="summary" && (
           <section className="grid two">
             <SummaryCards title="Trading Fees / Commission" map={commissionByAsset}/>
             <SummaryCards title="Referral Kickback" map={referralByAsset}/>
@@ -133,7 +158,7 @@ export default function App(){
         )}
 
         {/* SYMBOLS TAB */}
-        {active==="symbols" && (
+        {rows.length > 0 && active==="symbols" && (
           <section className="split" ref={ref} style={{gridTemplateColumns:`minmax(0,1fr) 12px ${rightPct}%`}}>
             <div>
               <div className="panel">
@@ -156,7 +181,7 @@ export default function App(){
         )}
 
         {/* EVENTS TAB */}
-        {active==="events" && (
+        {rows.length > 0 && active==="events" && (
           <section>
             <EventsPanel orders={eventOrders} payouts={eventPayouts}/>
           </section>
@@ -167,14 +192,6 @@ export default function App(){
           <section className="panel">
             <div className="panel-head">
               <h3 style={{margin:0}}>Raw Table</h3>
-              <button className="btn" onClick={()=>{
-                const { toCsv } = require("./utils/format") as any;
-                const csv = toCsv(rows.map(r=>({time:r.time,type:r.type,asset:r.asset,amount:r.amount,symbol:r.symbol,id:r.id,uid:r.uid,extra:r.extra})));
-                const blob = new Blob([csv], {type:"text/csv"});
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a"); a.href=url; a.download="balance_log.csv"; a.click();
-                URL.revokeObjectURL(url);
-              }}>Download CSV</button>
             </div>
             {rows.length ? (
               <div className="tablewrap">
@@ -191,7 +208,9 @@ export default function App(){
                   </tbody>
                 </table>
               </div>
-            ) : <p className="muted">No rows parsed.</p>}
+            ) : (
+              <p className="muted">No rows. Paste your log above and click <b>Use & Parse</b>.</p>
+            )}
           </section>
         )}
       </main>
