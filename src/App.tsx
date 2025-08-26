@@ -3,7 +3,7 @@ import React, { useMemo, useState, useEffect } from "react";
 import GridPasteBox from "@/components/GridPasteBox";
 import RpnCard from "@/components/RpnCard";
 import FiltersBar from "@/components/FiltersBar";
-import ExportPNG from "@/components/ExportPNG"; // SENDEKİ DOSYA ADI
+import ExportPNG from "./components/ExportPNG";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
 // Basit formatter (RpnCard kendi içinde formatlıyorsa bu import gerekmeyebilir)
