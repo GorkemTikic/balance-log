@@ -25,32 +25,46 @@ export default function StoryDrawer({
 }) {
   if (!open) return null;
 
-  const human = (t: string) => t.replace(/_/g, " ").replace(/\b([a-z])/g, s => s.toUpperCase());
-  const fmt = (n: number) => (Number.isFinite(n) ? (Math.round(n * 1e12) / 1e12).toString() : "0");
+  const human = (t: string) =>
+    t.replace(/_/g, " ").replace(/\b([a-z])/g, (s) => s.toUpperCase());
+  const fmt = (n: number) =>
+    Number.isFinite(n) ? (Math.round(n * 1e12) / 1e12).toString() : "0";
 
-  // Story metni: TÜM TYPE’lar, alfabetik TYPE sırasına göre
+  // Story metni: +0/−0 bastır ve tamamen sıfır satırları çıkar
   const storyText = useMemo(() => {
     const blocks: string[] = [];
-    blocks.push(
-      "Balance Story",
-      `Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`,
-      ""
-    );
-    const types = Object.keys(totalsByType).sort();
-    for (const typeKey of types) {
+    blocks.push("Balance Story", `Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`, "");
+
+    const typeKeys = Object.keys(totalsByType).sort();
+    for (const typeKey of typeKeys) {
       const m = totalsByType[typeKey] || {};
       const assets = Object.keys(m).sort();
+
+      // Bu TYPE için yazılacak en az bir satır var mı?
+      const anyLine = assets.some((a) => {
+        const v = m[a];
+        return (v.pos !== 0) || (v.neg !== 0) || (v.net !== 0);
+      });
+      if (!anyLine) continue;
+
       blocks.push(`${human(typeKey)}:`);
-      if (!assets.length) {
-        blocks.push("  (no entries)", "");
-        continue;
-      }
+
       for (const a of assets) {
         const v = m[a];
-        blocks.push(`  • ${a}  +${fmt(v.pos)}  −${fmt(v.neg)}  = ${fmt(v.net)}`);
+        // tamamen sıfırsa hiç yazma
+        if (v.pos === 0 && v.neg === 0 && v.net === 0) continue;
+
+        const parts: string[] = [];
+        if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
+        if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
+        // net her zaman anlamlı; ama tümü 0 ise zaten yukarıda atlandı
+        parts.push(`= ${fmt(v.net)}`);
+
+        blocks.push(`  • ${a}  ${parts.join("  ")}`);
       }
-      blocks.push(""); // boş satır
+      blocks.push(""); // TYPE bloğu arası boş satır
     }
+
     return blocks.join("\n");
   }, [t0, t1, totalsByType]);
 
