@@ -2,28 +2,30 @@ import { Row } from "../types";
 import { parseUtcMs } from "./time";
 
 /**
- * Ultra-tolerant log parser with fuzzy type normalization.
- * - Accepts TAB, comma, semicolon, or pipe and quoted CSV.
- * - Works with or without a header (will guess column roles).
- * - Robust amount parsing (commas, spaces, (123) negatives, “0.12 BTC”, unicode minus).
- * - Fuzzy map of many exchange type names -> canonical types used by the UI.
+ * Ultra-tolerant balance log parser.
+ * - Accepts TAB/Comma/Semicolon/Pipe and quoted CSV.
+ * - Works with or without a header (guesses column roles for headerless rows).
+ * - Skips 1-column "menu" lines (like the Binance toolkit section you pasted).
+ * - Robust amount parsing (commas, spaces, unicode minus, (123) negatives, "0.12 BTC").
+ * - Normalizes many exchange type labels -> canonical types used by the UI.
  */
 export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
   const diags: string[] = [];
   if (!raw || !raw.trim()) return { rows: [], diags: ["No input."] };
 
-  // normalize newlines & trim BOM
+  // Normalize newlines & trim BOM
   const text = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const lines = text.split("\n").filter(l => l.trim().length > 0);
   if (!lines.length) return { rows: [], diags: ["No non-empty lines."] };
 
   const delim = detectDelimiter(lines);
+  // If first line looks like a real header, use it; otherwise we'll guess
   const headerCells = splitCsv(lines[0], delim);
   const hasHeader = looksLikeHeader(headerCells);
 
   const start = hasHeader ? 1 : 0;
   const headerIdx = hasHeader ? indexMap(headerCells) : {};
-  const guessedIdx = !hasHeader ? guessColumnIndexes(lines.slice(0, Math.min(lines.length, 200)), delim) : {};
+  const guessedIdx = !hasHeader ? guessColumnIndexes(lines.slice(start, Math.min(lines.length, start + 300)), delim) : {};
 
   const getIdx = (k: keyof typeof headerIdx & keyof typeof guessedIdx) =>
     (headerIdx as any)[k] ?? (guessedIdx as any)[k];
@@ -31,21 +33,30 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
   const out: Row[] = [];
   for (let i = start; i < lines.length; i++) {
     const cols = splitCsv(lines[i], delim);
+
+    // Skip menu/banner/noise lines (1–2 columns)
+    if (cols.length < 5) {
+      diags.push(`Line ${i + 1}: skipped (only ${cols.length} column${cols.length === 1 ? "" : "s"})`);
+      continue;
+    }
+
+    // Accessor with fallback positions (headerless data)
     const get = (j?: number, fallback?: number) =>
       j != null && j < cols.length ? cols[j] ?? "" : (fallback != null && fallback < cols.length ? cols[fallback] ?? "" : "");
 
-    const timeStr  = (get(getIdx("time"), 0) as string).trim();
-    const typeStr0 = (get(getIdx("type"), 1) as string).trim();
-    const assetStr = (get(getIdx("asset"), 2) as string).trim();
-    const amtStr   = (get(getIdx("amount"), 3) as string).trim();
-    const symStr   = (get(getIdx("symbol"), 4) as string).trim();
-    const idStr    = (get(getIdx("id"), 5) as string).trim();
-    const uidStr   = (get(getIdx("uid"), 6) as string).trim();
-    const extraStr = (get(getIdx("extra")) || cols.slice(7).join(delim)).trim();
+    // Heuristic fallback positions: 0..9
+    const timeStr  = (get(getIdx("time"),   5) as string).trim();   // your sample time is column 5 (0-based)
+    const typeStr0 = (get(getIdx("type"),   3) as string).trim();
+    const assetStr = (get(getIdx("asset"),  2) as string).trim();
+    const amtStr   = (get(getIdx("amount"), 4) as string).trim();
+    const symStr   = (get(getIdx("symbol"), 6) as string).trim();
+    const idStr    = (get(getIdx("id"),     0) as string).trim();
+    const uidStr   = (get(getIdx("uid"),    1) as string).trim();
+    const extraStr = (get(getIdx("extra")) || [cols[7], cols[8], cols[9]].filter(Boolean).join(" ")).trim();
 
-    // Skip totally empty rows
+    // Basic emptiness guard
     if (!timeStr && !typeStr0 && !assetStr && !amtStr) {
-      diags.push(`Line ${i + 1}: skipped (empty/insufficient columns)`);
+      diags.push(`Line ${i + 1}: skipped (empty/insufficient values)`);
       continue;
     }
 
@@ -57,9 +68,10 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
 
     const normType = normalizeType(typeStr0, { asset: assetStr, symbol: symStr, extra: extraStr });
 
+    const ts = parseUtcMs(timeStr);
     const row: Row = {
       time: timeStr || "-",
-      ts: Number.isFinite(parseUtcMs(timeStr)) ? parseUtcMs(timeStr) : Date.now(),
+      ts: Number.isFinite(ts) ? ts : Date.now(),
       type: normType || typeStr0 || "-",
       asset: assetStr || "-",
       amount,
@@ -74,8 +86,8 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
   if (!out.length) {
     diags.push(
       "Parsed 0 rows. Tips:",
-      "• Make sure you pasted the plain table/CSV, not formatted HTML.",
-      `• Detected delimiter: "${delim}". If wrong, try a different export mode.`
+      `• Detected delimiter: "${delim}". If wrong, try a different export.`,
+      "• Make sure you pasted plain table/CSV, not formatted HTML."
     );
   }
 
@@ -89,7 +101,7 @@ function detectDelimiter(lines: string[]): string {
   const cand = ["\t", ",", ";", "|"];
   const score = (d: string) => sample.reduce((s, l) => s + (splitCsv(l, d).length - 1), 0);
   const ranked = cand.map(d => [d, score(d)] as const).sort((a, b) => b[1] - a[1]);
-  // prefer TAB on ties (Excel paste)
+  // prefer TAB on ties (Excel/table paste)
   return ranked[0][1] === 0 ? "\t" : (ranked[0][0] as string);
 }
 
@@ -117,21 +129,23 @@ function indexMap(header: string[]) {
   return idx as { time?: number; type?: number; asset?: number; amount?: number; symbol?: number; id?: number; uid?: number; extra?: number; };
 }
 
-/** Guess column indexes when there's no header. Looks at first 200 lines. */
+/** Guess column indexes when there's no header. Looks at up to first 300 data lines (after skipping menus). */
 function guessColumnIndexes(lines: string[], d: string) {
-  const maxCols = Math.max(...lines.map(l => splitCsv(l, d).length));
+  const dataLines = lines.filter(l => splitCsv(l, d).length >= 5);
+  if (!dataLines.length) return {};
+  const maxCols = Math.max(...dataLines.map(l => splitCsv(l, d).length));
   const score = Array.from({ length: maxCols }, () => ({ time: 0, type: 0, asset: 0, amount: 0, symbol: 0 }));
 
-  const sample = lines.slice(0, Math.min(lines.length, 200));
+  const sample = dataLines.slice(0, Math.min(dataLines.length, 300));
   for (const l of sample) {
     const cols = splitCsv(l, d);
     cols.forEach((cell, i) => {
       const t = cell.trim();
-      if (isLikelyTime(t)) score[i].time += 2;
-      if (isLikelyAmount(t)) score[i].amount += 3;
-      if (looksLikeTypeWord(t)) score[i].type += 2;
-      if (looksLikeAsset(t)) score[i].asset += 1;
-      if (looksLikeSymbol(t)) score[i].symbol += 1;
+      if (isLikelyTime(t)) score[i].time += 3;
+      if (isLikelyAmountCell(t)) score[i].amount += 4;
+      if (looksLikeTypeWord(t)) score[i].type += 3;
+      if (looksLikeAsset(t)) score[i].asset += 2;
+      if (looksLikeSymbol(t)) score[i].symbol += 2;
     });
   }
 
@@ -144,12 +158,13 @@ function guessColumnIndexes(lines: string[], d: string) {
   const symbol = pick("symbol");
   const asset  = pick("asset");
 
-  return { time, type, asset, amount, symbol } as { time?: number; type?: number; asset?: number; amount?: number; symbol?: number };
+  return { time, type, asset, amount, symbol } as {
+    time?: number; type?: number; asset?: number; amount?: number; symbol?: number;
+  };
 }
 
 function isLikelyTime(s: string) {
-  if (!s) return false;
-  // ISO or yyyy-mm-dd … or epochish (>= 10 digits)
+  // ISO / YYYY-MM-DD HH:mm / epoch ms / seconds
   return /\d{4}-\d{2}-\d{2}/.test(s) || /^\d{10,}$/.test(s);
 }
 function looksLikeTypeWord(s: string) {
@@ -157,11 +172,11 @@ function looksLikeTypeWord(s: string) {
   return /(p&?l|pnl|realiz|funding|commission|fee|rebate|referr|insurance|liquid|event|payout|order|convert|swap|transfer|grid)/.test(t);
 }
 function looksLikeAsset(s: string) {
-  // USDT/USDC/etc. short uppercase
+  // USDT/USDC/etc
   return /^[A-Z]{3,6}$/.test(s.trim());
 }
 function looksLikeSymbol(s: string) {
-  // BTCUSDT, ETH-USD, BTC/USD
+  // BTCUSDT / ETH-USD / BTC/USD
   return /^[A-Z]{2,6}[-_/]?[A-Z]{2,6}$/.test(s.trim());
 }
 
@@ -184,7 +199,7 @@ function splitCsv(line: string, d: string): string[] {
   return out;
 }
 
-/* --------- Amount parser --------- */
+/* --------- Amount parsing --------- */
 function parseAmount(s: string): number {
   if (!s) return NaN;
   let t = s.trim();
@@ -193,18 +208,16 @@ function parseAmount(s: string): number {
   const token = t.split(/\s+/);
   if (token.length >= 2 && isLikelyNumber(token[0])) t = token[0];
 
-  // parenthesis negative: (123.45)
+  // (123.45) -> -123.45
   const m = /^\(\s*([^)]+)\s*\)$/.exec(t);
   if (m) t = "-" + m[1];
 
-  // remove thousands & spaces
-  t = t.replace(/[\s,’']/g, "");
-  // unicode minus -> ascii
-  t = t.replace("−", "-");
+  t = t.replace(/[\s,’']/g, "");   // remove spaces, thin spaces, apostrophes
+  t = t.replace("−", "-");         // unicode minus -> ascii
 
-  // if format like 1.234,56 assume comma decimal
+  // 1.234,56 -> 1234.56
   if (/^-?\d{1,3}(?:\.\d{3})+,\d+$/.test(s)) t = t.replace(/\./g, "").replace(",", ".");
-  // or 1234,56
+  // 1234,56 -> 1234.56
   if (/^-?\d+,\d+$/.test(s)) t = t.replace(",", ".");
 
   const n = Number(t);
@@ -218,9 +231,9 @@ function isLikelyNumber(s: string) {
 function normalizeType(rawType: string, ctx: { asset?: string; symbol?: string; extra?: string }): string {
   const t = (rawType || "").toLowerCase().trim();
 
-  // direct hits
-  if (/^real/i.test(t) || /(p&?l|pnl)/.test(t) || /realiz/.test(t)) return "REALIZED_PNL";
-  if (/fund/i.test(t)) return "FUNDING_FEE";
+  // direct/common
+  if (/^real/.test(t) || /(p&?l|pnl)/.test(t) || /realiz/.test(t)) return "REALIZED_PNL";
+  if (/fund/.test(t)) return "FUNDING_FEE";
   if (/(commission|fee)/.test(t) && !/fund/.test(t)) return "COMMISSION";
   if (/(referr|rebate|kickback|cashback)/.test(t)) return "REFERRAL_KICKBACK";
   if (/(insurance|liq(?!uid)|liquidation)/.test(t)) return "INSURANCE_CLEAR";
@@ -242,5 +255,5 @@ function normalizeType(rawType: string, ctx: { asset?: string; symbol?: string; 
   if (!t && /(convert|auto.?exchange)/.test(e)) return "AUTO_EXCHANGE";
   if (!t && /(transfer)/.test(e)) return "TRANSFER";
 
-  return rawType; // fallback to original if unknown
+  return rawType; // fallback to original text if unknown
 }
