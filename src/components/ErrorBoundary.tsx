@@ -3,10 +3,7 @@ import React from "react";
 
 type State = { hasError: boolean; message: string };
 
-export default class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  State
-> {
+export default class ErrorBoundary extends React.Component<{ children: React.ReactNode }, State> {
   state: State = { hasError: false, message: "" };
 
   static getDerivedStateFromError(err: unknown): State {
@@ -14,7 +11,6 @@ export default class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: unknown, info: unknown) {
-    // eslint-disable-next-line no-console
     console.error("ErrorBoundary caught:", error, info);
   }
 
