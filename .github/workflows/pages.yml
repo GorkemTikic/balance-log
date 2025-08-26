@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,27 +18,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Resmi NPM registry'yi zorla
-      - name: Setup Node.js
+      - name: Setup Node.js (npm registry = npmjs)
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: 'https://registry.npmjs.org'
-          cache: 'npm'
+          registry-url: https://registry.npmjs.org
+          # cache: 'npm'  # LOCK YOK -> KULLANMIYORUZ
 
-      # Güvenlik taramalarını kapat, resmi registryle kurulum yap
-      - name: Install
+      - name: Ensure npm registry (.npmrc)
         run: |
-          npm ci --no-audit --no-fund
-        env:
-          NODE_AUTH_TOKEN: ''   # Boş token; özel paket yok
+          echo "registry=https://registry.npmjs.org/" > .npmrc
+          echo "@types:registry=https://registry.npmjs.org/" >> .npmrc
+          echo "always-auth=false" >> .npmrc
+
+      - name: Install deps (no lock)
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build
 
-      # (Varsa) GitHub Pages'a deploy
-      # Statik siteyi dist/ klasörüne ürettiğimizi varsayıyorum
-      - name: Upload artifact
+      - name: Upload artifact (dist)
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
@@ -41,12 +45,6 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
