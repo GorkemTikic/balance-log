@@ -1,80 +1,99 @@
 // src/App.tsx
-useEffect(() => { if (!rows.length) { setStoryT0(""); setStoryT1(""); } }, [rows.length]);
+}
+lines.push({ time: t, ts, text: `${t} (UTC+0) — Out: ${outs.length ? outs.join(", ") : "0"} → In: ${ins.length ? ins.join(", ") : "0"}` });
+}
+lines.sort((a, b) => a.ts - b.ts);
+return lines;
+}
 
 
-return (
-<div className="container">
-<header className="header">
-<div>
-<h1 className="title">Balance Log Analyzer</h1>
-<div className="subtitle">All times are UTC+0</div>
-</div>
-<div className="toolbar">
-<button className="btn btn-primary" onClick={onPasteAndParseText}>Paste plain text & Parse</button>
-<button className="btn" onClick={() => alert('To parse, paste a table below or raw text, then click Parse.')}>Help</button>
-<button className="btn btn-dark" onClick={() => setStoryOpen(true)}>Open Balance Story</button>
-</div>
-</header>
+// ---- Phase 3 additions: filters & persistence ----
+const DEFAULT_FILTERS: Filters = {
+t0: "",
+t1: "",
+symbol: "",
+show: {
+realized: true,
+funding: true,
+commission: true,
+insurance: true,
+transfers: true,
+coinSwaps: true,
+autoExchange: true,
+events: true,
+},
+};
 
 
-<section className="space">
-<GridPasteBox onUseTSV={(tsv) => { setInput(tsv); runParse(tsv); }} onError={(m) => {/* optional toast */}} />
-{error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
-</section>
+function applyFilters(rows: Row[], f: Filters) {
+const start = f.t0 ? parseUtcMs(f.t0) : Number.NEGATIVE_INFINITY;
+const end = f.t1 ? parseUtcMs(f.t1) : Number.POSITIVE_INFINITY;
+const sym = f.symbol.trim().toUpperCase();
+const keepType = (t: string) => {
+switch (t) {
+case TYPE.REALIZED_PNL: return f.show.realized;
+case TYPE.FUNDING_FEE: return f.show.funding;
+case TYPE.COMMISSION: return f.show.commission;
+case TYPE.INSURANCE_CLEAR:
+case TYPE.LIQUIDATION_FEE: return f.show.insurance;
+case TYPE.TRANSFER: return f.show.transfers;
+case TYPE.COIN_SWAP_DEPOSIT:
+case TYPE.COIN_SWAP_WITHDRAW: return f.show.coinSwaps;
+case TYPE.AUTO_EXCHANGE: return f.show.autoExchange;
+default:
+if (t.startsWith(EVENT_PREFIX)) return f.show.events;
+return true;
+}
+};
+return rows.filter((r) => {
+if (!(r.ts >= start && r.ts <= end)) return false;
+if (sym && !(r.symbol || "").toUpperCase().includes(sym)) return false;
+if (!keepType(r.type)) return false;
+return true;
+});
+}
 
 
-{!!rows.length && (
-<section className="grid-2" style={{ marginTop: 16 }}>
-<RpnCard title="Realized PnL" map={realizedByAsset} />
-<RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-<RpnCard title="Funding Fees" map={fundingByAsset} />
-<RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-<RpnCard title="Transfers (General)" map={transfersByAsset} />
-</section>
-)}
+export default function App() {
+const [input, setInput] = useState("");
+const [rows, setRows] = useState<Row[]>([]);
+const [diags, setDiags] = useState<string[]>([]);
+const [error, setError] = useState("");
 
 
-{!!allSymbolBlocks.length && (
-<section style={{ marginTop: 16 }}>
-<SymbolTable blocks={allSymbolBlocks} onFocus={focusSymbolRow} />
-</section>
-)}
+const [filters, setFilters] = useLocalStorage<Filters>("bl.filters.v1", DEFAULT_FILTERS);
 
 
-{(coinSwapLines.length || autoExLines.length || Object.keys(eventsOrderByAsset).length || Object.keys(eventsPayoutByAsset).length) && (
-<section>
-<SwapsEvents
-coinSwapLines={coinSwapLines}
-autoExLines={autoExLines}
-eventsOrdersByAsset={eventsOrderByAsset}
-eventsPayoutsByAsset={eventsPayoutByAsset}
-/>
-</section>
-)}
+const [storyOpen, setStoryOpen] = useLocalStorage<boolean>("bl.story.open", false);
+const [storyT0, setStoryT0] = useLocalStorage<string>("bl.story.t0", "");
+const [storyT1, setStoryT1] = useLocalStorage<string>("bl.story.t1", "");
 
 
-{!!diags.length && (
-<details className="card" style={{ marginTop: 16 }}>
-<summary>Parser diagnostics</summary>
-<ul style={{ marginTop: 8 }}>
-{diags.map((d, i) => (<li key={i} className="mono" style={{ fontSize: 12 }}>{d}</li>))}
-</ul>
-</details>
-)}
+// Parse
+function runParse(tsv: string) {
+setError("");
+try {
+const { rows: rs, diags } = parseBalanceLog(tsv);
+if (!rs.length) throw new Error("No valid rows detected.");
+setRows(rs);
+setDiags(diags);
+} catch (e: any) {
+setError(e?.message || String(e));
+setRows([]);
+setDiags([]);
+}
+}
+function onPasteAndParseText() {
+if (navigator.clipboard?.readText) {
+navigator.clipboard.readText().then((t) => {
+setInput(t);
+setTimeout(() => runParse(t), 0);
+});
+}
+}
 
 
-<footer className="footer-note">This build adds Symbol Table, Swaps & Events, and a right-side Balance Story drawer.</footer>
-
-
-<StoryDrawer
-open={storyOpen}
-onClose={() => setStoryOpen(false)}
-t0={storyT0}
-t1={storyT1}
-setT0={setStoryT0}
-setT1={setStoryT1}
-totals={storyTotals}
-/>
-</div>
-);
+// Derived (apply filters first)
+const filteredRows = useMemo(() => applyFilters(rows, filters), [rows, filters]);
+const nonEvent = useMemo(() => onlyNonEvents(filteredRows), [filteredRows]);
 }
