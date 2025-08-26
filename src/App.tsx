@@ -3,9 +3,10 @@ import React, { useMemo, useState, useEffect } from "react";
 import GridPasteBox from "@/components/GridPasteBox";
 import RpnCard from "@/components/RpnCard";
 import FiltersBar from "@/components/FiltersBar";
-import ExportPNG from "@/components/ExportPNG";
-import { gt } from "@/lib/format"; // (opsiyonel) kullanmıyorsan bu satırı silebilirsin
+import ExportPNG from "@/components/ExportPNG"; // SENDEKİ DOSYA ADI
+import ErrorBoundary from "@/components/ErrorBoundary";
 
+// Basit formatter (RpnCard kendi içinde formatlıyorsa bu import gerekmeyebilir)
 type Row = {
   id: string;
   uid: string;
@@ -34,25 +35,25 @@ function parseBalanceLog(text: string): Row[] {
     .map((l) => l.trim())
     .filter(Boolean);
   const out: Row[] = [];
-  lines.forEach((line) => {
+  for (const line of lines) {
     const cols = line.split(/\t|\s{2,}|\s\|\s/);
-    if (cols.length < 6) return;
+    if (cols.length < 6) continue;
     const [id, uid, asset, type, amtRaw, time] = cols;
     const amt = Number(amtRaw);
-    if (Number.isNaN(amt)) return;
+    if (Number.isNaN(amt)) continue;
     out.push({
-      id,
-      uid,
-      asset,
-      type,
+      id: id || "",
+      uid: uid || "",
+      asset: asset || "",
+      type: type || "",
       amount: amt,
-      time,
-      ts: Date.parse(time),
+      time: time || "",
+      ts: Date.parse(time || ""),
       symbol: cols[6] || "",
       extra: cols.slice(7).join(" "),
       raw: line,
     });
-  });
+  }
   return out;
 }
 
@@ -71,6 +72,7 @@ export default function App() {
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState("");
 
+  // Basit filtre state (FiltersBar ile uyumlu)
   const [filterSymbol, setFilterSymbol] = useState(
     localStorage.getItem("filterSymbol") || ""
   );
@@ -97,16 +99,18 @@ export default function App() {
       setRows(rs);
       setError(rs.length ? "" : "No valid rows");
     } catch (e: any) {
-      setError(e.message || String(e));
+      setError(e?.message || String(e));
       setRows([]);
     }
   }
 
   const filtered = useMemo(() => {
+    const t0 = filterT0 ? Date.parse(filterT0) : -Infinity;
+    const t1 = filterT1 ? Date.parse(filterT1) : Infinity;
+    const sym = filterSymbol.trim().toUpperCase();
     return rows.filter((r) => {
-      if (filterSymbol && r.symbol !== filterSymbol) return false; // tam eşleşme; istersen includes() yapabiliriz
-      if (filterT0 && r.ts < Date.parse(filterT0)) return false;
-      if (filterT1 && r.ts > Date.parse(filterT1)) return false;
+      if (!(r.ts >= t0 && r.ts <= t1)) return false;
+      if (sym && !(r.symbol || "").toUpperCase().includes(sym)) return false;
       return true;
     });
   }, [rows, filterSymbol, filterT0, filterT1]);
@@ -138,40 +142,43 @@ export default function App() {
   );
 
   return (
-    <div className="container" id="app-root">
-      <header className="header">
-        <div>
-          <h1 className="title">Balance Log Analyzer</h1>
-          <div className="subtitle">Phase 3 — Filters & PNG Export</div>
-        </div>
-        <div className="toolbar">
-          <PngExport targetId="app-root" />
-        </div>
-      </header>
+    <ErrorBoundary>
+      <div className="container" id="app-root">
+        <header className="header">
+          <div>
+            <h1 className="title">Balance Log Analyzer</h1>
+            <div className="subtitle">Filters & PNG Export</div>
+          </div>
+          <div className="toolbar">
+            {/* Senin var olan metin-tabanlı ExportPNG bileşeni */}
+            <ExportPNG text={"Balance Log — export\n(Use Story Drawer text if you wire it here)"} />
+          </div>
+        </header>
 
-      <FiltersBar
-        symbolFilter={filterSymbol}
-        setSymbolFilter={setFilterSymbol}
-        date0={filterT0}
-        setDate0={setFilterT0}
-        date1={filterT1}
-        setDate1={setFilterT1}
-      />
+        <FiltersBar
+          symbolFilter={filterSymbol}
+          setSymbolFilter={setFilterSymbol}
+          date0={filterT0}
+          setDate0={setFilterT0}
+          date1={filterT1}
+          setDate1={setFilterT1}
+        />
 
-      <section className="space">
-        <GridPasteBox onUseTSV={runParse} onError={setError} />
-        {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
-      </section>
-
-      {!!filtered.length && (
-        <section className="grid-2" style={{ marginTop: 16 }}>
-          <RpnCard title="Realized PnL" map={realizedByAsset} />
-          <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
-          <RpnCard title="Funding Fees" map={fundingByAsset} />
-          <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
-          <RpnCard title="Transfers (General)" map={transfersByAsset} />
+        <section className="space">
+          <GridPasteBox onUseTSV={runParse} onError={setError} />
+          {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
         </section>
-      )}
-    </div>
+
+        {!!filtered.length && (
+          <section className="grid-2" style={{ marginTop: 16 }}>
+            <RpnCard title="Realized PnL" map={realizedByAsset} />
+            <RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+            <RpnCard title="Funding Fees" map={fundingByAsset} />
+            <RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+            <RpnCard title="Transfers (General)" map={transfersByAsset} />
+          </section>
+        )}
+      </div>
+    </ErrorBoundary>
   );
 }
