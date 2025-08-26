@@ -3,7 +3,7 @@ import React, { useMemo, useState, useEffect } from "react";
 import GridPasteBox from "@/components/GridPasteBox";
 import RpnCard from "@/components/RpnCard";
 import FiltersBar from "@/components/FiltersBar";
-import PngExport from "@/components/PngExport";
+import ExportPNG from "@/components/ExportPNG";
 import { gt } from "@/lib/format"; // (opsiyonel) kullanmıyorsan bu satırı silebilirsin
 
 type Row = {
