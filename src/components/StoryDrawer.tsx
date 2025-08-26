@@ -1,6 +1,7 @@
 // src/components/StoryDrawer.tsx
 import React, { useMemo } from "react";
 import { fmtAbs, fmtSigned, gt } from "@/lib/format";
+import ExportPNG from "@/components/ExportPNG";
 
 
 export type TotalsMaps = {
@@ -71,4 +72,21 @@ aria-hidden={!open}
 style={{
 position: "fixed",
 top: 0,
+right: 0,
+bottom: 0,
+width: open ? 420 : 0,
+background: "#fff",
+borderLeft: "1px solid var(--border)",
+boxShadow: "var(--shadow)",
+overflow: "hidden",
+transition: "width .22s ease",
+zIndex: 50,
+}}
+>
+<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 12, borderBottom: "1px solid var(--border)" }}>
+<strong>Balance Story</strong>
+<div className="btn-row">
+<ExportPNG text={story} fileName="balance-story.png" />
+<button className="btn" onClick={onClose}>Close</button>
+</div>
 }
