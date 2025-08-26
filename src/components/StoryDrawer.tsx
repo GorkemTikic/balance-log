@@ -2,10 +2,8 @@
 import React, { useMemo } from "react";
 import ExportPNG from "@/components/ExportPNG";
 
-type TotalsMap = Record<
-  string,
-  { pos: number; neg: number; net: number }
->;
+type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
+type TotalsByType = Record<string, TotalsMap>;
 
 export default function StoryDrawer({
   open,
@@ -14,7 +12,7 @@ export default function StoryDrawer({
   t1,
   setT0,
   setT1,
-  totals,
+  totalsByType,
 }: {
   open: boolean;
   onClose: () => void;
@@ -22,34 +20,15 @@ export default function StoryDrawer({
   t1: string;
   setT0: (s: string) => void;
   setT1: (s: string) => void;
-  totals: {
-    realized: TotalsMap;
-    funding: TotalsMap;
-    commission: TotalsMap;
-    insurance: TotalsMap;
-    transfers: TotalsMap;
-    eventsO: TotalsMap; // Event Contracts - Orders
-    eventsP: TotalsMap; // Event Contracts - Payouts
-  };
+  /** App’ten gelen: TYPE -> (asset -> +/−/net) */
+  totalsByType: TotalsByType;
 }) {
   if (!open) return null;
 
-  const fmt = (n: number) =>
-    Number.isFinite(n) ? (Math.round(n * 1e8) / 1e8).toString() : "0";
+  const human = (t: string) => t.replace(/_/g, " ").replace(/\b([a-z])/g, s => s.toUpperCase());
+  const fmt = (n: number) => (Number.isFinite(n) ? (Math.round(n * 1e12) / 1e12).toString() : "0");
 
-  function tableLines(title: string, m: TotalsMap) {
-    const keys = Object.keys(m).sort();
-    if (!keys.length) return [`${title}: (no entries)`];
-    const lines: string[] = [`${title}:`];
-    for (const k of keys) {
-      const v = m[k];
-      lines.push(
-        `  • ${k}  +${fmt(v.pos)}  −${fmt(v.neg)}  = ${fmt(v.net)}`
-      );
-    }
-    return lines;
-  }
-
+  // Story metni: TÜM TYPE’lar, alfabetik TYPE sırasına göre
   const storyText = useMemo(() => {
     const blocks: string[] = [];
     blocks.push(
@@ -57,15 +36,23 @@ export default function StoryDrawer({
       `Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`,
       ""
     );
-    blocks.push(...tableLines("Realized PnL", totals.realized), "");
-    blocks.push(...tableLines("Trading Fees / Commission", totals.commission), "");
-    blocks.push(...tableLines("Funding Fees", totals.funding), "");
-    blocks.push(...tableLines("Insurance / Liquidation", totals.insurance), "");
-    blocks.push(...tableLines("Transfers", totals.transfers), "");
-    blocks.push(...tableLines("Event Contracts — Orders", totals.eventsO), "");
-    blocks.push(...tableLines("Event Contracts — Payouts", totals.eventsP), "");
+    const types = Object.keys(totalsByType).sort();
+    for (const typeKey of types) {
+      const m = totalsByType[typeKey] || {};
+      const assets = Object.keys(m).sort();
+      blocks.push(`${human(typeKey)}:`);
+      if (!assets.length) {
+        blocks.push("  (no entries)", "");
+        continue;
+      }
+      for (const a of assets) {
+        const v = m[a];
+        blocks.push(`  • ${a}  +${fmt(v.pos)}  −${fmt(v.neg)}  = ${fmt(v.net)}`);
+      }
+      blocks.push(""); // boş satır
+    }
     return blocks.join("\n");
-  }, [t0, t1, totals]);
+  }, [t0, t1, totalsByType]);
 
   return (
     <div
@@ -82,7 +69,6 @@ export default function StoryDrawer({
       }}
       onClick={onClose}
     >
-      {/* Drawer panel */}
       <div
         className="card"
         style={{
@@ -132,7 +118,6 @@ export default function StoryDrawer({
           </div>
         </div>
 
-        {/* Plain text preview */}
         <div className="card" style={{ marginTop: 8 }}>
           <h4 className="section-title" style={{ marginBottom: 8 }}>Preview</h4>
           <pre
