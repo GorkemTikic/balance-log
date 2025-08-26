@@ -4,7 +4,7 @@ import GridPasteBox from "@/components/GridPasteBox";
 import FilterBar, { Filters } from "@/components/FilterBar";
 import StoryDrawer from "@/components/StoryDrawer";
 import SwapsEvents from "@/components/SwapsEvents";
-import SymbolTable from "@/components/SymbolTable"; // <-- yeni dosya
+import SymbolTable from "@/components/SymbolTable";
 import RpnTable from "@/components/RpnTable";
 import Tabs, { TabKey } from "@/components/Tabs";
 import KpiStat from "@/components/KpiStat";
@@ -14,21 +14,8 @@ type Row = {
   time: string; ts: number; symbol: string; extra: string; raw: string;
 };
 
-const TYPE = {
-  REALIZED_PNL: "REALIZED_PNL",
-  COMMISSION: "COMMISSION",
-  FUNDING_FEE: "FUNDING_FEE",
-  INSURANCE_CLEAR: "INSURANCE_CLEAR",
-  LIQUIDATION_FEE: "LIQUIDATION_FEE",
-  TRANSFER: "TRANSFER",
-  COIN_SWAP_DEPOSIT: "COIN_SWAP_DEPOSIT",
-  COIN_SWAP_WITHDRAW: "COIN_SWAP_WITHDRAW",
-  AUTO_EXCHANGE: "AUTO_EXCHANGE",
-  EVENT_ORDER: "EVENT_CONTRACTS_ORDER",
-  EVENT_PAYOUT: "EVENT_CONTRACTS_PAYOUT",
-} as const;
-
-const EVENT_PREFIX = "EVENT_CONTRACTS_";
+type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
+type TotalsByType = Record<string, TotalsMap>;
 
 function useLocalStorage<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => {
@@ -62,8 +49,8 @@ function parseBalanceLog(text: string){
   return rows;
 }
 
-function sumByAsset(rows: Row[]){
-  const acc: Record<string,{pos:number;neg:number;net:number}> = {};
+function sumByAsset(rows: Row[]): TotalsMap{
+  const acc: TotalsMap = {};
   for(const r of rows){
     const a = (acc[r.asset] ||= { pos:0, neg:0, net:0 });
     if(r.amount >= 0) a.pos += r.amount; else a.neg += Math.abs(r.amount);
@@ -72,49 +59,70 @@ function sumByAsset(rows: Row[]){
   return acc;
 }
 
+/** Hangi TYPE gelirse gelsin, asset bazında toplar. */
+function groupByTypeAndAsset(rows: Row[]): TotalsByType {
+  const map = new Map<string, Row[]>();
+  for(const r of rows){
+    const key = r.type || "(unknown)";
+    (map.get(key) || map.set(key, []).get(key)!)!.push(r);
+  }
+  const out: TotalsByType = {};
+  for(const [t, list] of map.entries()) out[t] = sumByAsset(list);
+  return out;
+}
+
 function applyFilters(rows: Row[], f: Filters){
   const t0 = f.t0 ? parseUTC(f.t0) : -Infinity;
   const t1 = f.t1 ? parseUTC(f.t1) :  Infinity;
   const sym = f.symbol.trim().toUpperCase();
-  const keepType = (t: string) => {
-    switch(t){
-      case TYPE.REALIZED_PNL: return f.show.realized;
-      case TYPE.FUNDING_FEE: return f.show.funding;
-      case TYPE.COMMISSION: return f.show.commission;
-      case TYPE.INSURANCE_CLEAR:
-      case TYPE.LIQUIDATION_FEE: return f.show.insurance;
-      case TYPE.TRANSFER: return f.show.transfers;
-      case TYPE.COIN_SWAP_DEPOSIT:
-      case TYPE.COIN_SWAP_WITHDRAW: return f.show.coinSwaps;
-      case TYPE.AUTO_EXCHANGE: return f.show.autoExchange;
-      default: return t.startsWith(EVENT_PREFIX) ? f.show.events : true;
-    }
-  };
-  return rows.filter(r => (r.ts>=t0 && r.ts<=t1) && (!sym || (r.symbol||"").toUpperCase().includes(sym)) && keepType(r.type));
+  // Eski checkbox’ların davranışını “içeriyorsa göster” olarak yorumluyoruz.
+  const enabled: string[] = [];
+  if (f.show.realized)    enabled.push("REALIZED_PNL");
+  if (f.show.funding)     enabled.push("FUNDING_FEE");
+  if (f.show.commission)  enabled.push("COMMISSION");
+  if (f.show.insurance)   enabled.push("INSURANCE_CLEAR", "LIQUIDATION_FEE");
+  if (f.show.transfers)   enabled.push("TRANSFER");
+  if (f.show.coinSwaps)   enabled.push("COIN_SWAP_DEPOSIT","COIN_SWAP_WITHDRAW");
+  if (f.show.autoExchange)enabled.push("AUTO_EXCHANGE");
+  if (f.show.events)      enabled.push("EVENT_CONTRACTS_"); // prefix
+
+  return rows.filter(r => {
+    if(!(r.ts>=t0 && r.ts<=t1)) return false;
+    if(sym && !(r.symbol||"").toUpperCase().includes(sym)) return false;
+    // Eğer listedeki tiplerden hiçbiriyle eşleşmiyorsa ama kullanıcı başka tiplere de bakmak istiyorsa?
+    // Eski davranışı korumak için listedeki ana tiplerden en az birine match ederse geçer; events prefix kontrolü:
+    const ok = enabled.length === 0
+      ? true
+      : enabled.some(k => k.endsWith("_") ? r.type.startsWith(k) : r.type === k);
+    return ok;
+  });
 }
 
-function groupSwaps(rows: Row[], kind: "COIN_SWAP"|"AUTO_EXCHANGE"){
-  const isCoin = (t:string)=> t===TYPE.COIN_SWAP_DEPOSIT || t===TYPE.COIN_SWAP_WITHDRAW;
-  const filtered = rows.filter(r => kind==="COIN_SWAP" ? isCoin(r.type) : r.type===TYPE.AUTO_EXCHANGE);
+/** Metin içinde ipucu ile Coin Swap ve Auto-Exchange satırlarını grupla (eski görünüm için) */
+function groupSwaps(lines: Row[], kind: "COIN_SWAP"|"AUTO_EXCHANGE"){
+  const matcher = kind === "COIN_SWAP"
+    ? (t:string)=> t.includes("COIN_SWAP")
+    : (t:string)=> t === "AUTO_EXCHANGE";
+  const filtered = lines.filter(r => matcher(r.type));
   const map = new Map<string, Row[]>();
   for(const r of filtered){ const key = `${r.time}|${r.extra.split("@")[0]||""}`; (map.get(key) || map.set(key, []).get(key)!)!.push(r); }
-  const lines: { time:string; ts:number; text:string }[] = [];
+  const out: { time:string; ts:number; text:string }[] = [];
   for(const [,group] of map.entries()){
     const t = group[0].time, ts = group[0].ts;
     const byAsset = new Map<string, number>();
     for(const g of group) byAsset.set(g.asset, (byAsset.get(g.asset)||0)+g.amount);
     const outs:string[] = [], ins:string[] = [];
     for(const [asset, amt] of byAsset.entries()){ if(amt<0) outs.push(`−${Math.abs(amt)} ${asset}`); if(amt>0) ins.push(`+${amt} ${asset}`); }
-    lines.push({ time:t, ts, text: `${t} — Out: ${outs.length?outs.join(", "):"0"} → In: ${ins.length?ins.join(", "):"0"}` });
+    out.push({ time:t, ts, text: `${t} — Out: ${outs.length?outs.join(", "):"0"} → In: ${ins.length?ins.join(", "):"0"}` });
   }
-  lines.sort((a,b)=>a.ts-b.ts);
-  return lines;
+  out.sort((a,b)=>a.ts-b.ts);
+  return out;
 }
 
 export default function App(){
   const [rawRows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState("");
-  const [filters, setFilters] = useLocalStorage<Filters>("bl.filters.v2", {
+  const [filters, setFilters] = useLocalStorage<Filters>("bl.filters.v3", {
     t0:"", t1:"", symbol:"",
     show: { realized:true, funding:true, commission:true, insurance:true, transfers:true, coinSwaps:true, autoExchange:true, events:true }
   });
@@ -136,35 +144,39 @@ export default function App(){
 
   const rows = useMemo(()=>applyFilters(rawRows, filters), [rawRows, filters]);
 
-  const realized   = useMemo(()=> rows.filter(r => r.type===TYPE.REALIZED_PNL), [rows]);
-  const commission = useMemo(()=> rows.filter(r => r.type===TYPE.COMMISSION), [rows]);
-  const funding    = useMemo(()=> rows.filter(r => r.type===TYPE.FUNDING_FEE), [rows]);
-  const insurance  = useMemo(()=> rows.filter(r => r.type===TYPE.INSURANCE_CLEAR || r.type===TYPE.LIQUIDATION_FEE), [rows]);
-  const transfers  = useMemo(()=> rows.filter(r => r.type===TYPE.TRANSFER), [rows]);
-  const events     = useMemo(()=> rows.filter(r => r.type.startsWith("EVENT_CONTRACTS_")), [rows]);
+  // Dinamik: TYPE -> asset totals
+  const totalsByType = useMemo(()=> groupByTypeAndAsset(rows), [rows]);
 
-  const realizedByAsset   = useMemo(()=> sumByAsset(realized), [realized]);
-  const commissionByAsset = useMemo(()=> sumByAsset(commission), [commission]);
-  const fundingByAsset    = useMemo(()=> sumByAsset(funding), [funding]);
-  const insuranceByAsset  = useMemo(()=> sumByAsset(insurance), [insurance]);
-  const transfersByAsset  = useMemo(()=> sumByAsset(transfers), [transfers]);
-
+  // Ekrandaki eski bloklar için (ayrı görünümler)
   const coinSwapLines = useMemo(()=> groupSwaps(rows, "COIN_SWAP"), [rows]);
   const autoExLines   = useMemo(()=> groupSwaps(rows, "AUTO_EXCHANGE"), [rows]);
 
-  const eventsOrdersByAsset  = useMemo(()=> sumByAsset(events.filter(r=>r.type===TYPE.EVENT_ORDER)),  [events]);
-  const eventsPayoutsByAsset = useMemo(()=> sumByAsset(events.filter(r=>r.type===TYPE.EVENT_PAYOUT)), [events]);
+  // Event Orders/Payouts tablosu için; ama story/summary zaten dinamik toplamda olacak
+  const eventsOrdersByAsset  = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_ORDER")),  [rows]);
+  const eventsPayoutsByAsset = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_PAYOUT")), [rows]);
 
   // KPIs
   const kpiTotal = rawRows.length;
   const kpiFiltered = rows.length;
   const kpiSymbols = new Set(rows.map(r=>r.symbol).filter(Boolean)).size;
 
+  // Başlıkları insanlaştır
+  const human = (t: string) => t.replace(/_/g, " ").replace(/\b([a-z])/g, s => s.toUpperCase());
+
+  // Summary kartlarını sırala: en çok mutlak net’e sahip TYPE önce
+  const typeOrder = useMemo(() => {
+    const entries = Object.entries(totalsByType);
+    const magnitude = (m: TotalsMap) =>
+      Object.values(m).reduce((a, v) => a + Math.abs(v.net) + v.pos + v.neg, 0);
+    return entries.sort((a,b)=> magnitude(b[1]) - magnitude(a[1]));
+  }, [totalsByType]);
+
   return (
     <div className="container">
       <header className="header">
         <div>
           <h1 className="title">Balance Log Analyzer</h1>
+          <div className="subtitle">All types are included dynamically (agent-facing)</div>
         </div>
         <div className="toolbar">
           <button className="btn btn-dark" onClick={()=>setDrawerOpen(true)}>Open Balance Story</button>
@@ -189,25 +201,27 @@ export default function App(){
 
       <Tabs active={tab} onChange={setTab} />
 
+      {/* TAB: Summary — TÜM TYPE’lar */}
       {tab === "summary" && (
         <section className="grid-2">
-          <RpnTable title="Realized PnL" map={realizedByAsset} />
-          <RpnTable title="Trading Fees / Commission" map={commissionByAsset} />
-          <RpnTable title="Funding Fees" map={fundingByAsset} />
-          <RpnTable title="Insurance / Liquidation" map={insuranceByAsset} />
-          <RpnTable title="Transfers (General)" map={transfersByAsset} />
+          {typeOrder.map(([typeKey, totals]) => (
+            <RpnTable key={typeKey} title={human(typeKey)} map={totals} />
+          ))}
         </section>
       )}
 
+      {/* TAB: By Symbol — dilersen events’i de ekleyebilirim; şu an futures odaklı bırakıyorum */}
       {tab === "symbol" && (
         <section style={{ marginTop: 12 }}>
-          {/* EVENT'SİZ satırlar SymbolTable'a gider */}
-          <SymbolTable rows={rows.filter(r => !r.type.startsWith("EVENT_CONTRACTS_")).map(r => ({
-            symbol: r.symbol, asset: r.asset, type: r.type, amount: r.amount
-          }))} />
+          <SymbolTable
+            rows={rows
+              .filter(r => !r.type.startsWith("EVENT_CONTRACTS_"))
+              .map(r => ({ symbol: r.symbol, asset: r.asset, type: r.type, amount: r.amount }))}
+          />
         </section>
       )}
 
+      {/* TAB: Swaps & Events (eski özel görünümler korunuyor) */}
       {tab === "swaps" && (
         <section style={{ marginTop: 12 }}>
           <SwapsEvents
@@ -219,6 +233,7 @@ export default function App(){
         </section>
       )}
 
+      {/* TAB: Diagnostics */}
       {tab === "diag" && (
         <section className="card" style={{ marginTop: 12 }}>
           <h3 className="section-title" style={{marginBottom:8}}>Diagnostics</h3>
@@ -226,10 +241,12 @@ export default function App(){
             <li>Rows parsed: {rawRows.length}</li>
             <li>Rows after filters: {rows.length}</li>
             <li>Unique symbols (filtered): {kpiSymbols}</li>
+            <li>Types found: {Object.keys(totalsByType).length}</li>
           </ul>
         </section>
       )}
 
+      {/* StoryDrawer: TÜM TYPE’lar gönderiliyor */}
       <StoryDrawer
         open={drawerOpen}
         onClose={()=>setDrawerOpen(false)}
@@ -237,15 +254,7 @@ export default function App(){
         t1={storyT1}
         setT0={setStoryT0}
         setT1={setStoryT1}
-        totals={{
-          realized: realizedByAsset,
-          funding: fundingByAsset,
-          commission: commissionByAsset,
-          insurance: insuranceByAsset,
-          transfers: transfersByAsset,
-          eventsO: eventsOrdersByAsset,
-          eventsP: eventsPayoutsByAsset,
-        }}
+        totalsByType={totalsByType}
       />
     </div>
   );
