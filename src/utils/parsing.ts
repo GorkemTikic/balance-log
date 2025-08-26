@@ -4,9 +4,10 @@ import { parseUtcMs } from "./time";
 /**
  * Ultra-tolerant balance log parser.
  * - Accepts TAB/Comma/Semicolon/Pipe and quoted CSV.
- * - Works with or without a header (guesses column roles for headerless rows).
- * - Skips 1-column "menu" lines (like the Binance toolkit section you pasted).
- * - Robust amount parsing (commas, spaces, unicode minus, (123) negatives, "0.12 BTC").
+ * - Works with or without a header. For your headerless 10-column format,
+ *   it locks the mapping to avoid wrong guesses (so we never sum IDs again).
+ * - Skips 1-column menu/banner lines.
+ * - Robust amount parsing (commas/spaces/unicode minus/(123) negatives/"0.12 BTC").
  * - Normalizes many exchange type labels -> canonical types used by the UI.
  */
 export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
@@ -26,8 +27,27 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
   const headerIdx = hasHeader ? indexMap(headerCells) : {};
   const guessedIdx = !hasHeader ? guessColumnIndexes(lines.slice(start, Math.min(lines.length, start + 300)), delim) : {};
 
-  const getIdx = (k: keyof typeof headerIdx & keyof typeof guessedIdx) =>
-    (headerIdx as any)[k] ?? (guessedIdx as any)[k];
+  // --- FORCE MAPPING FOR YOUR KNOWN HEADERLESS FORMAT (prevents mis-summing IDs) ---
+  // Expected order (0-based): id, uid, asset, type, amount, time, symbol, txid, email, timeAgain
+  let forced: Partial<Idx> | null = null;
+  const probe = lines.slice(start).find(l => splitCsv(l, delim).length >= 7);
+  if (probe) {
+    const c = splitCsv(probe, delim);
+    if (
+      c.length >= 7 &&
+      isLikelyTime(c[5]) &&
+      looksLikeTypeWord(c[3]) &&
+      looksLikeAsset(c[2]) &&
+      isLikelyAmountCell(c[4])
+    ) {
+      forced = { time: 5, type: 3, asset: 2, amount: 4, symbol: 6, id: 0, uid: 1 };
+    }
+  }
+
+  const getIdx = (k: keyof Idx) =>
+    (forced as any)?.[k] ??
+    (headerIdx as any)[k] ??
+    (guessedIdx as any)[k];
 
   const out: Row[] = [];
   for (let i = start; i < lines.length; i++) {
@@ -39,12 +59,12 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
       continue;
     }
 
-    // Accessor with fallback positions (headerless data)
+    // Accessor with fallback positions (still keep sane defaults)
     const get = (j?: number, fallback?: number) =>
       j != null && j < cols.length ? cols[j] ?? "" : (fallback != null && fallback < cols.length ? cols[fallback] ?? "" : "");
 
-    // Heuristic fallback positions for your sample dataset
-    const timeStr  = (get(getIdx("time"),   5) as string).trim();   // sample: time at col 5 (0-based)
+    // Use forced/header/guessed indexes; if any missing, fall back to your format’s positions
+    const timeStr  = (get(getIdx("time"),   5) as string).trim();
     const typeStr0 = (get(getIdx("type"),   3) as string).trim();
     const assetStr = (get(getIdx("asset"),  2) as string).trim();
     const amtStr   = (get(getIdx("amount"), 4) as string).trim();
@@ -65,9 +85,9 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
     }
 
     const normType = normalizeType(typeStr0, { asset: assetStr, symbol: symStr, extra: extraStr });
-
     const ts = parseUtcMs(timeStr);
-    const row: Row = {
+
+    out.push({
       time: timeStr || "-",
       ts: Number.isFinite(ts) ? ts : Date.now(),
       type: normType || typeStr0 || "-",
@@ -77,15 +97,14 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
       id: idStr || "",
       uid: uidStr || "",
       extra: extraStr || ""
-    };
-    out.push(row);
+    });
   }
 
   if (!out.length) {
     diags.push(
-      "Parsed 0 rows. Tips:",
-      `• Detected delimiter: "${delim}". If wrong, try a different export.`,
-      "• Make sure you pasted plain table/CSV, not formatted HTML."
+      "Parsed 0 rows.",
+      `• Detected delimiter: "${delim}". If wrong, try a different export/paste.`,
+      "• Ensure you pasted the plain table/CSV (not formatted HTML)."
     );
   }
 
@@ -94,12 +113,15 @@ export function parseBalanceLog(raw: string): { rows: Row[]; diags: string[] } {
 
 /* ---------------- helpers ---------------- */
 
+type Idx = {
+  time?: number; type?: number; asset?: number; amount?: number; symbol?: number; id?: number; uid?: number; extra?: number;
+};
+
 function detectDelimiter(lines: string[]): string {
   const sample = lines.slice(0, Math.min(40, lines.length));
   const cand = ["\t", ",", ";", "|"];
   const score = (d: string) => sample.reduce((s, l) => s + (splitCsv(l, d).length - 1), 0);
   const ranked = cand.map(d => [d, score(d)] as const).sort((a, b) => b[1] - a[1]);
-  // prefer TAB on ties (Excel/table paste)
   return ranked[0][1] === 0 ? "\t" : (ranked[0][0] as string);
 }
 
@@ -124,10 +146,10 @@ function indexMap(header: string[]) {
     else if (["uid", "user", "account"].includes(k)) idx.uid = i;
     else if (["extra", "note", "memo", "data", "comment"].includes(k)) idx.extra = i;
   });
-  return idx as { time?: number; type?: number; asset?: number; amount?: number; symbol?: number; id?: number; uid?: number; extra?: number; };
+  return idx as Idx;
 }
 
-/** Guess column indexes when there's no header. Looks at up to first 300 data lines (after skipping menus). */
+/** Guess column indexes when there's no header (light heuristic). */
 function guessColumnIndexes(lines: string[], d: string) {
   const dataLines = lines.filter(l => splitCsv(l, d).length >= 5);
   if (!dataLines.length) return {};
@@ -156,27 +178,18 @@ function guessColumnIndexes(lines: string[], d: string) {
   const symbol = pick("symbol");
   const asset  = pick("asset");
 
-  return { time, type, asset, amount, symbol } as {
-    time?: number; type?: number; asset?: number; amount?: number; symbol?: number;
-  };
+  return { time, type, asset, amount, symbol } as Idx;
 }
 
 function isLikelyTime(s: string) {
-  // ISO / YYYY-MM-DD HH:mm / epoch ms / seconds
   return /\d{4}-\d{2}-\d{2}/.test(s) || /^\d{10,}$/.test(s);
 }
 function looksLikeTypeWord(s: string) {
   const t = s.toLowerCase();
   return /(p&?l|pnl|realiz|funding|commission|fee|rebate|referr|insurance|liquid|event|payout|order|convert|swap|transfer|grid)/.test(t);
 }
-function looksLikeAsset(s: string) {
-  // USDT/USDC/etc
-  return /^[A-Z]{3,6}$/.test(s.trim());
-}
-function looksLikeSymbol(s: string) {
-  // BTCUSDT / ETH-USD / BTC/USD
-  return /^[A-Z]{2,6}[-_/]?[A-Z]{2,6}$/.test(s.trim());
-}
+function looksLikeAsset(s: string) { return /^[A-Z]{3,6}$/.test(s.trim()); }
+function looksLikeSymbol(s: string) { return /^[A-Z]{2,6}[-_/]?[A-Z]{2,6}$/.test(s.trim()); }
 
 /* --------- CSV splitter with quotes --------- */
 function splitCsv(line: string, d: string): string[] {
@@ -210,7 +223,7 @@ function parseAmount(s: string): number {
   const m = /^\(\s*([^)]+)\s*\)$/.exec(t);
   if (m) t = "-" + m[1];
 
-  t = t.replace(/[\s,’']/g, "");   // remove spaces, thin spaces, apostrophes
+  t = t.replace(/[\s,’']/g, "");   // spaces/thin spaces/apostrophes
   t = t.replace("−", "-");         // unicode minus -> ascii
 
   // 1.234,56 -> 1234.56
@@ -221,14 +234,11 @@ function parseAmount(s: string): number {
   const n = Number(t);
   return Number.isFinite(n) ? n : NaN;
 }
-function isLikelyNumber(s: string) {
-  return /^[-+()]?[\d\s,.'’ ]+(?:[.,]\d+)?$/.test(s);
-}
-/** NEW: used during header guessing to score which column looks like "amount" */
+function isLikelyNumber(s: string) { return /^[-+()]?[\d\s,.'’ ]+(?:[.,]\d+)?$/.test(s); }
+/** Used during guessing to score amount-like cells */
 function isLikelyAmountCell(s: string) {
   if (!s) return false;
   const t = s.trim();
-  // simple quick checks (don’t fully parse; just pattern match)
   return /^[-+()]?[\d\s,.'’ ]+(?:[.,]\d+)?(?:\s[A-Z]{3,6})?$/.test(t);
 }
 
@@ -236,7 +246,6 @@ function isLikelyAmountCell(s: string) {
 function normalizeType(rawType: string, ctx: { asset?: string; symbol?: string; extra?: string }): string {
   const t = (rawType || "").toLowerCase().trim();
 
-  // direct/common
   if (/^real/.test(t) || /(p&?l|pnl)/.test(t) || /realiz/.test(t)) return "REALIZED_PNL";
   if (/fund/.test(t)) return "FUNDING_FEE";
   if (/(commission|fee)/.test(t) && !/fund/.test(t)) return "COMMISSION";
@@ -251,7 +260,7 @@ function normalizeType(rawType: string, ctx: { asset?: string; symbol?: string; 
   if (/(event).*(order|stake|wager|bet)/.test(t)) return "EVENT_ORDER";
   if (/(event).*(payout|settle|win|loss)/.test(t)) return "EVENT_PAYOUT";
 
-  // contextual hints
+  // contextual hints from extra
   const e = (ctx.extra || "").toLowerCase();
   if (!t && /(funding)/.test(e)) return "FUNDING_FEE";
   if (!t && /(commission|fee)/.test(e)) return "COMMISSION";
@@ -260,5 +269,5 @@ function normalizeType(rawType: string, ctx: { asset?: string; symbol?: string; 
   if (!t && /(convert|auto.?exchange)/.test(e)) return "AUTO_EXCHANGE";
   if (!t && /(transfer)/.test(e)) return "TRANSFER";
 
-  return rawType; // fallback to original text if unknown
+  return rawType; // fallback to original if unknown
 }
