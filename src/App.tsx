@@ -1,89 +1,80 @@
 // src/App.tsx
-import React, { useMemo, useState, useRef, useEffect } from "react";
-import GridPasteBox from "@/components/GridPasteBox";
-import RpnCard from "@/components/RpnCard";
-import { gt, fmtAbs, fmtSigned } from "@/lib/format";
+useEffect(() => { if (!rows.length) { setStoryT0(""); setStoryT1(""); } }, [rows.length]);
 
 
-// NOTE: This is a minimal, behavior-preserving extraction pass.
-// Parsing/aggregation helpers remain here; UI pieces moved to components.
+return (
+<div className="container">
+<header className="header">
+<div>
+<h1 className="title">Balance Log Analyzer</h1>
+<div className="subtitle">All times are UTC+0</div>
+</div>
+<div className="toolbar">
+<button className="btn btn-primary" onClick={onPasteAndParseText}>Paste plain text & Parse</button>
+<button className="btn" onClick={() => alert('To parse, paste a table below or raw text, then click Parse.')}>Help</button>
+<button className="btn btn-dark" onClick={() => setStoryOpen(true)}>Open Balance Story</button>
+</div>
+</header>
 
 
-type Row = {
-id: string; uid: string; asset: string; type: string; amount: number;
-time: string; ts: number; symbol: string; extra: string; raw: string;
-};
+<section className="space">
+<GridPasteBox onUseTSV={(tsv) => { setInput(tsv); runParse(tsv); }} onError={(m) => {/* optional toast */}} />
+{error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
+</section>
 
 
-const DATE_RE = /(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2})/; // UTC+0
-const SYMBOL_RE = /^[A-Z0-9]{2,}(USDT|USDC|USD|BTC|ETH|BNB|BNFCR)$/;
+{!!rows.length && (
+<section className="grid-2" style={{ marginTop: 16 }}>
+<RpnCard title="Realized PnL" map={realizedByAsset} />
+<RpnCard title="Trading Fees / Commission" map={commissionByAsset} />
+<RpnCard title="Funding Fees" map={fundingByAsset} />
+<RpnCard title="Insurance / Liquidation" map={insuranceByAsset} />
+<RpnCard title="Transfers (General)" map={transfersByAsset} />
+</section>
+)}
 
 
-const TYPE = {
-REALIZED_PNL: "REALIZED_PNL",
-FUNDING_FEE: "FUNDING_FEE",
-COMMISSION: "COMMISSION",
-INSURANCE_CLEAR: "INSURANCE_CLEAR",
-LIQUIDATION_FEE: "LIQUIDATION_FEE",
-REFERRAL_KICKBACK: "REFERRAL_KICKBACK",
-TRANSFER: "TRANSFER",
-GRIDBOT_TRANSFER: "STRATEGY_UMFUTURES_TRANSFER",
-COIN_SWAP_DEPOSIT: "COIN_SWAP_DEPOSIT",
-COIN_SWAP_WITHDRAW: "COIN_SWAP_WITHDRAW",
-AUTO_EXCHANGE: "AUTO_EXCHANGE",
-EVENT_ORDER: "EVENT_CONTRACTS_ORDER",
-EVENT_PAYOUT: "EVENT_CONTRACTS_PAYOUT",
-} as const;
+{!!allSymbolBlocks.length && (
+<section style={{ marginTop: 16 }}>
+<SymbolTable blocks={allSymbolBlocks} onFocus={focusSymbolRow} />
+</section>
+)}
 
 
-const EVENT_PREFIX = "EVENT_CONTRACTS_";
-const EVENT_KNOWN_CORE = new Set([TYPE.EVENT_ORDER, TYPE.EVENT_PAYOUT]);
-const KNOWN_TYPES = new Set<string>(Object.values(TYPE));
+{(coinSwapLines.length || autoExLines.length || Object.keys(eventsOrderByAsset).length || Object.keys(eventsPayoutByAsset).length) && (
+<section>
+<SwapsEvents
+coinSwapLines={coinSwapLines}
+autoExLines={autoExLines}
+eventsOrdersByAsset={eventsOrderByAsset}
+eventsPayoutsByAsset={eventsPayoutByAsset}
+/>
+</section>
+)}
 
 
-/* ---------- time utils ---------- */
-function normalizeTimeString(s: string): string {
-const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})$/);
-if (!m) return s;
-const [, y, mo, d, h, mi, se] = m;
-const hh = h.padStart(2, "0");
-return `${y}-${mo}-${d} ${hh}:${mi}:${se}`;
-}
-function parseUtcMs(s: string): number {
-const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})$/);
-if (!m) return NaN;
-const [, Y, Mo, D, H, Mi, S] = m;
-return Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S);
-}
-function tsToUtcString(millis: number): string {
-const d = new Date(millis);
-const pad = (n: number) => String(n).padStart(2, "0");
-const Y = d.getUTCFullYear();
-const M = pad(d.getUTCMonth() + 1);
-const D = pad(d.getUTCDate());
-const H = pad(d.getUTCHours());
-const I = pad(d.getUTCMinutes());
-const S = pad(d.getUTCSeconds());
-return `${Y}-${M}-${D} ${H}:${I}:${S}`;
-}
+{!!diags.length && (
+<details className="card" style={{ marginTop: 16 }}>
+<summary>Parser diagnostics</summary>
+<ul style={{ marginTop: 8 }}>
+{diags.map((d, i) => (<li key={i} className="mono" style={{ fontSize: 12 }}>{d}</li>))}
+</ul>
+</details>
+)}
 
 
-/* ---------- general helpers ---------- */
-function splitColumns(line: string) {
-if (line.includes("\t")) return line.split(/\t+/);
-return line.trim().split(/\s{2,}|\s\|\s|\s+/);
-}
-function firstDateIn(line: string) {
-const m = line.match(DATE_RE);
-return m ? m[1] : "";
-}
-function parseBalanceLog(text: string) {
-const rows: Row[] = [];
-const diags: string[] = [];
-const lines = text
-.replace(/[\u00A0\u2000-\u200B]/g, " ")
-.split(/\r?\n/)
-.map((l) => l.trim())
-.filter(Boolean);
-for (const line of lines) {
+<footer className="footer-note">This build adds Symbol Table, Swaps & Events, and a right-side Balance Story drawer.</footer>
+
+
+<StoryDrawer
+open={storyOpen}
+onClose={() => setStoryOpen(false)}
+t0={storyT0}
+t1={storyT1}
+setT0={setStoryT0}
+setT1={setStoryT1}
+totals={storyTotals}
+/>
+</div>
+);
 }
