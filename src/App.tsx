@@ -3,21 +3,12 @@ import React, { useMemo, useState, useEffect } from "react";
 import GridPasteBox from "@/components/GridPasteBox";
 import RpnCard from "@/components/RpnCard";
 import FiltersBar from "@/components/FiltersBar";
-import ExportPNG from "./components/ExportPNG";
+import ExportPNG from "@/components/ExportPNG";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
-// Basit formatter (RpnCard kendi içinde formatlıyorsa bu import gerekmeyebilir)
 type Row = {
-  id: string;
-  uid: string;
-  asset: string;
-  type: string;
-  amount: number;
-  time: string;
-  ts: number;
-  symbol: string;
-  extra: string;
-  raw: string;
+  id: string; uid: string; asset: string; type: string; amount: number;
+  time: string; ts: number; symbol: string; extra: string; raw: string;
 };
 
 const TYPE = {
@@ -30,10 +21,7 @@ const TYPE = {
 } as const;
 
 function parseBalanceLog(text: string): Row[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const out: Row[] = [];
   for (const line of lines) {
     const cols = line.split(/\t|\s{2,}|\s\|\s/);
@@ -42,29 +30,20 @@ function parseBalanceLog(text: string): Row[] {
     const amt = Number(amtRaw);
     if (Number.isNaN(amt)) continue;
     out.push({
-      id: id || "",
-      uid: uid || "",
-      asset: asset || "",
-      type: type || "",
-      amount: amt,
-      time: time || "",
-      ts: Date.parse(time || ""),
-      symbol: cols[6] || "",
-      extra: cols.slice(7).join(" "),
-      raw: line,
+      id: id || "", uid: uid || "", asset: asset || "", type: type || "",
+      amount: amt, time: time || "", ts: Date.parse(time || ""),
+      symbol: cols[6] || "", extra: cols.slice(7).join(" "), raw: line,
     });
   }
   return out;
 }
-
 function sumByAsset(rows: Row[]) {
   const acc: Record<string, { pos: number; neg: number; net: number }> = {};
-  rows.forEach((r) => {
+  for (const r of rows) {
     const a = (acc[r.asset] = acc[r.asset] || { pos: 0, neg: 0, net: 0 });
-    if (r.amount >= 0) a.pos += r.amount;
-    else a.neg += Math.abs(r.amount);
+    if (r.amount >= 0) a.pos += r.amount; else a.neg += Math.abs(r.amount);
     a.net += r.amount;
-  });
+  }
   return acc;
 }
 
@@ -72,26 +51,13 @@ export default function App() {
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState("");
 
-  // Basit filtre state (FiltersBar ile uyumlu)
-  const [filterSymbol, setFilterSymbol] = useState(
-    localStorage.getItem("filterSymbol") || ""
-  );
-  const [filterT0, setFilterT0] = useState(
-    localStorage.getItem("filterT0") || ""
-  );
-  const [filterT1, setFilterT1] = useState(
-    localStorage.getItem("filterT1") || ""
-  );
+  const [filterSymbol, setFilterSymbol] = useState(localStorage.getItem("filterSymbol") || "");
+  const [filterT0, setFilterT0] = useState(localStorage.getItem("filterT0") || "");
+  const [filterT1, setFilterT1] = useState(localStorage.getItem("filterT1") || "");
 
-  useEffect(() => {
-    localStorage.setItem("filterSymbol", filterSymbol);
-  }, [filterSymbol]);
-  useEffect(() => {
-    localStorage.setItem("filterT0", filterT0);
-  }, [filterT0]);
-  useEffect(() => {
-    localStorage.setItem("filterT1", filterT1);
-  }, [filterT1]);
+  useEffect(() => { localStorage.setItem("filterSymbol", filterSymbol); }, [filterSymbol]);
+  useEffect(() => { localStorage.setItem("filterT0", filterT0); }, [filterT0]);
+  useEffect(() => { localStorage.setItem("filterT1", filterT1); }, [filterT1]);
 
   function runParse(tsv: string) {
     try {
@@ -115,31 +81,11 @@ export default function App() {
     });
   }, [rows, filterSymbol, filterT0, filterT1]);
 
-  const realizedByAsset = useMemo(
-    () => sumByAsset(filtered.filter((r) => r.type === TYPE.REALIZED_PNL)),
-    [filtered]
-  );
-  const commissionByAsset = useMemo(
-    () => sumByAsset(filtered.filter((r) => r.type === TYPE.COMMISSION)),
-    [filtered]
-  );
-  const fundingByAsset = useMemo(
-    () => sumByAsset(filtered.filter((r) => r.type === TYPE.FUNDING_FEE)),
-    [filtered]
-  );
-  const insuranceByAsset = useMemo(
-    () =>
-      sumByAsset(
-        filtered.filter(
-          (r) => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE
-        )
-      ),
-    [filtered]
-  );
-  const transfersByAsset = useMemo(
-    () => sumByAsset(filtered.filter((r) => r.type === TYPE.TRANSFER)),
-    [filtered]
-  );
+  const realizedByAsset   = useMemo(() => sumByAsset(filtered.filter(r => r.type === TYPE.REALIZED_PNL)), [filtered]);
+  const commissionByAsset = useMemo(() => sumByAsset(filtered.filter(r => r.type === TYPE.COMMISSION)), [filtered]);
+  const fundingByAsset    = useMemo(() => sumByAsset(filtered.filter(r => r.type === TYPE.FUNDING_FEE)), [filtered]);
+  const insuranceByAsset  = useMemo(() => sumByAsset(filtered.filter(r => r.type === TYPE.INSURANCE_CLEAR || r.type === TYPE.LIQUIDATION_FEE)), [filtered]);
+  const transfersByAsset  = useMemo(() => sumByAsset(filtered.filter(r => r.type === TYPE.TRANSFER)), [filtered]);
 
   return (
     <ErrorBoundary>
@@ -150,8 +96,8 @@ export default function App() {
             <div className="subtitle">Filters & PNG Export</div>
           </div>
           <div className="toolbar">
-            {/* Senin var olan metin-tabanlı ExportPNG bileşeni */}
-            <ExportPNG text={"Balance Log — export\n(Use Story Drawer text if you wire it here)"} />
+            {/* ExportPNG senin metin tabanlı exporter’ındır */}
+            <ExportPNG text={"Balance Story preview will go here."} />
           </div>
         </header>
 
