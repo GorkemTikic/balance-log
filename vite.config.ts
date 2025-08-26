@@ -4,9 +4,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
-  // GitHub Pages için: depo adınla aynı base kullan
-  // https://<kullanici>.github.io/<REPO_ADI>/
-  base: "/balance-log/",
+  base: "/balance-log/", // repo adın farklıysa bunu değiştir
   plugins: [react()],
   resolve: {
     alias: {
@@ -14,6 +12,6 @@ export default defineConfig({
     },
   },
   build: {
-    sourcemap: true, // GH Pages'ta sorun çıksa teşhis kolay olsun
+    sourcemap: true,
   },
 });
