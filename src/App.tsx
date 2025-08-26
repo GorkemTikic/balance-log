@@ -4,7 +4,7 @@ import GridPasteBox from "@/components/GridPasteBox";
 import FilterBar, { Filters } from "@/components/FilterBar";
 import StoryDrawer from "@/components/StoryDrawer";
 import SwapsEvents from "@/components/SwapsEvents";
-import SymbolTable from "@/components/SymbolTable";
+import SymbolTable from "@/components/SymbolTable"; // <-- yeni dosya
 import RpnTable from "@/components/RpnTable";
 import Tabs, { TabKey } from "@/components/Tabs";
 import KpiStat from "@/components/KpiStat";
@@ -141,7 +141,7 @@ export default function App(){
   const funding    = useMemo(()=> rows.filter(r => r.type===TYPE.FUNDING_FEE), [rows]);
   const insurance  = useMemo(()=> rows.filter(r => r.type===TYPE.INSURANCE_CLEAR || r.type===TYPE.LIQUIDATION_FEE), [rows]);
   const transfers  = useMemo(()=> rows.filter(r => r.type===TYPE.TRANSFER), [rows]);
-  const events     = useMemo(()=> rows.filter(r => r.type.startsWith(EVENT_PREFIX)), [rows]);
+  const events     = useMemo(()=> rows.filter(r => r.type.startsWith("EVENT_CONTRACTS_")), [rows]);
 
   const realizedByAsset   = useMemo(()=> sumByAsset(realized), [realized]);
   const commissionByAsset = useMemo(()=> sumByAsset(commission), [commission]);
@@ -165,36 +165,30 @@ export default function App(){
       <header className="header">
         <div>
           <h1 className="title">Balance Log Analyzer</h1>
-          <div className="subtitle">All times are UTC+0 • agent-facing layout</div>
         </div>
         <div className="toolbar">
           <button className="btn btn-dark" onClick={()=>setDrawerOpen(true)}>Open Balance Story</button>
         </div>
       </header>
 
-      {/* Filters */}
       <FilterBar value={filters} onChange={setFilters} onReset={() => setFilters({
         t0:"", t1:"", symbol:"",
         show: { realized:true, funding:true, commission:true, insurance:true, transfers:true, coinSwaps:true, autoExchange:true, events:true }
       })} />
 
-      {/* Paste box */}
       <section className="space">
         <GridPasteBox onUseTSV={runParse} onError={setError} />
         {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
       </section>
 
-      {/* KPI Row */}
       <section className="kpi-row">
         <KpiStat label="Rows (total)" value={kpiTotal} />
         <KpiStat label="Rows (filtered)" value={kpiFiltered} />
         <KpiStat label="Symbols (filtered)" value={kpiSymbols} />
       </section>
 
-      {/* Tabs */}
       <Tabs active={tab} onChange={setTab} />
 
-      {/* TAB: Summary */}
       {tab === "summary" && (
         <section className="grid-2">
           <RpnTable title="Realized PnL" map={realizedByAsset} />
@@ -205,20 +199,15 @@ export default function App(){
         </section>
       )}
 
-      {/* TAB: By Symbol */}
       {tab === "symbol" && (
         <section style={{ marginTop: 12 }}>
-          <SymbolTable
-            blocks={[] /* your existing SymbolTable can still be used if you prefer; else we can replace with a cleaner version */}
-            onFocus={()=>{}}
-          />
-          <div className="card" style={{marginTop:8, color:"#64748b"}}>
-            <div>This placeholder keeps your existing SymbolTable wiring. If your SymbolTable component expects specific props, keep using it; otherwise tell me and I’ll ship a redesigned one.</div>
-          </div>
+          {/* EVENT'SİZ satırlar SymbolTable'a gider */}
+          <SymbolTable rows={rows.filter(r => !r.type.startsWith("EVENT_CONTRACTS_")).map(r => ({
+            symbol: r.symbol, asset: r.asset, type: r.type, amount: r.amount
+          }))} />
         </section>
       )}
 
-      {/* TAB: Swaps & Events */}
       {tab === "swaps" && (
         <section style={{ marginTop: 12 }}>
           <SwapsEvents
@@ -230,19 +219,17 @@ export default function App(){
         </section>
       )}
 
-      {/* TAB: Diagnostics */}
       {tab === "diag" && (
         <section className="card" style={{ marginTop: 12 }}>
           <h3 className="section-title" style={{marginBottom:8}}>Diagnostics</h3>
-          <p className="muted small">If parsing or filtering behaves unexpectedly, paste a problematic few lines here and share with support.</p>
           <ul className="mono small" style={{ lineHeight: "20px", marginTop: 8 }}>
             <li>Rows parsed: {rawRows.length}</li>
             <li>Rows after filters: {rows.length}</li>
+            <li>Unique symbols (filtered): {kpiSymbols}</li>
           </ul>
         </section>
       )}
 
-      {/* Drawer */}
       <StoryDrawer
         open={drawerOpen}
         onClose={()=>setDrawerOpen(false)}
