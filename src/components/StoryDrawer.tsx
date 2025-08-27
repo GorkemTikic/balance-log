@@ -1,155 +1,262 @@
 // src/components/StoryDrawer.tsx
-import React, { useMemo } from "react";
-import ExportPNG from "@/components/ExportPNG";
+import React, { useMemo, useState } from "react";
+import { buildNarrative, buildAudit, totalsByType } from "@/lib/story";
 
-type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
-type TotalsByType = Record<string, TotalsMap>;
+export type Row = {
+  id: string; uid: string; asset: string; type: string; amount: number;
+  time: string; ts: number; symbol: string; extra: string; raw: string;
+};
 
 export default function StoryDrawer({
   open,
   onClose,
+  rows,        // FILTERED rows from App (date/symbol/type filters already applied)
   t0,
   t1,
-  setT0,
-  setT1,
-  totalsByType,
 }: {
   open: boolean;
   onClose: () => void;
-  t0: string;
-  t1: string;
-  setT0: (s: string) => void;
-  setT1: (s: string) => void;
-  /** App’ten gelen: TYPE -> (asset -> +/−/net) */
-  totalsByType: TotalsByType;
+  rows: Row[];
+  t0?: string;
+  t1?: string;
 }) {
-  if (!open) return null;
+  const [tab, setTab] = useState<"narrative" | "audit" | "raw">("narrative");
 
-  const human = (t: string) =>
-    t.replace(/_/g, " ").replace(/\b([a-z])/g, (s) => s.toUpperCase());
-  const fmt = (n: number) =>
-    Number.isFinite(n) ? (Math.round(n * 1e12) / 1e12).toString() : "0";
+  // --- Narrative text (friendly, clear, all types included)
+  const narrative = useMemo(() => buildNarrative(rows, t0, t1), [rows, t0, t1]);
 
-  // Story metni: +0/−0 bastır ve tamamen sıfır satırları çıkar
-  const storyText = useMemo(() => {
-    const blocks: string[] = [];
-    blocks.push("Balance Story", `Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`, "");
+  // --- Audit inputs
+  const [anchor, setAnchor] = useState<string>("");
+  const [end, setEnd] = useState<string>("");
+  const [baselineText, setBaselineText] = useState<string>(""); // lines: ASSET amount
+  const [anchorAsset, setAnchorAsset] = useState<string>("");
+  const [anchorAmount, setAnchorAmount] = useState<string>("");
 
-    const typeKeys = Object.keys(totalsByType).sort();
-    for (const typeKey of typeKeys) {
-      const m = totalsByType[typeKey] || {};
-      const assets = Object.keys(m).sort();
-
-      // Bu TYPE için yazılacak en az bir satır var mı?
-      const anyLine = assets.some((a) => {
-        const v = m[a];
-        return (v.pos !== 0) || (v.neg !== 0) || (v.net !== 0);
-      });
-      if (!anyLine) continue;
-
-      blocks.push(`${human(typeKey)}:`);
-
-      for (const a of assets) {
-        const v = m[a];
-        // tamamen sıfırsa hiç yazma
-        if (v.pos === 0 && v.neg === 0 && v.net === 0) continue;
-
-        const parts: string[] = [];
-        if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
-        if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
-        // net her zaman anlamlı; ama tümü 0 ise zaten yukarıda atlandı
-        parts.push(`= ${fmt(v.net)}`);
-
-        blocks.push(`  • ${a}  ${parts.join("  ")}`);
-      }
-      blocks.push(""); // TYPE bloğu arası boş satır
+  // Baseline parser
+  function parseBaseline(s: string): Record<string, number> | undefined {
+    const out: Record<string, number> = {};
+    const lines = s.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return undefined;
+    for (const line of lines) {
+      const m = line.match(/^([A-Z0-9_]+)\s+(-?\d+(?:\.\d+)?)(?:\s*)$/i);
+      if (!m) continue;
+      const asset = m[1].toUpperCase();
+      const val = Number(m[2]);
+      if (!Number.isFinite(val)) continue;
+      out[asset] = (out[asset] || 0) + val;
     }
+    return Object.keys(out).length ? out : undefined;
+  }
 
-    return blocks.join("\n");
-  }, [t0, t1, totalsByType]);
+  // Timestamp parser (expects "YYYY-MM-DD HH:MM:SS")
+  function parseUTC(s: string): number | undefined {
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) return undefined;
+    const [,Y,Mo,D,H,Mi,S] = m;
+    return Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S);
+    // Note: UI says UTC+0 everywhere.
+  }
+
+  const auditText = useMemo(() => {
+    const anchorTs = anchor ? parseUTC(anchor) : undefined;
+    if (!anchorTs) return "Set an Anchor time (UTC+0) to run the audit.";
+    const endTs = end ? parseUTC(end) : undefined;
+    const baseline = parseBaseline(baselineText);
+    const anchorTransfer =
+      anchorAsset && anchorAmount
+        ? { asset: anchorAsset.toUpperCase(), amount: Number(anchorAmount) }
+        : undefined;
+
+    try {
+      return buildAudit(rows, {
+        anchorTs,
+        endTs,
+        baseline,
+        anchorTransfer,
+      });
+    } catch (e: any) {
+      return "Audit failed: " + (e?.message || String(e));
+    }
+  }, [anchor, end, baselineText, anchorAsset, anchorAmount, rows]);
+
+  const rawPreview = useMemo(() => {
+    // quick raw totals by type (for debugging/ops)
+    const t = totalsByType(rows);
+    const lines: string[] = [];
+    lines.push("Diagnostics (Totals by Type):");
+    for (const typeKey of Object.keys(t).sort()) {
+      lines.push(`  ${typeKey}:`);
+      const m = t[typeKey];
+      for (const k of Object.keys(m).sort()) {
+        const v = m[k];
+        lines.push(`    • ${k}  +${v.pos}  −${v.neg}  = ${v.net}`);
+      }
+    }
+    return lines.join("\n");
+  }, [rows]);
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      alert("Copied to clipboard.");
+    } catch {
+      alert("Copy failed. Your browser may block clipboard access.");
+    }
+  }
+
+  if (!open) return null;
 
   return (
     <div
       aria-modal
       role="dialog"
+      onClick={onClose}
       style={{
         position: "fixed",
         inset: 0,
         zIndex: 50,
-        display: "flex",
-        alignItems: "stretch",
-        justifyContent: "flex-end",
         background: "rgba(0,0,0,0.25)",
+        display: "flex",
+        justifyContent: "flex-end",
       }}
-      onClick={onClose}
     >
       <div
+        onClick={(e) => e.stopPropagation()}
         className="card"
         style={{
-          width: "min(720px, 100%)",
+          width: "min(820px, 100%)",
           height: "100%",
           margin: 0,
           borderRadius: 0,
           overflow: "auto",
-          boxShadow: "0 10px 30px rgba(0,0,0,.25)",
           background: "#fff",
+          boxShadow: "0 10px 30px rgba(0,0,0,.25)",
         }}
-        onClick={(e) => e.stopPropagation()}
       >
+        {/* Header */}
         <div
           className="section-head"
-          style={{ alignItems: "center", position: "sticky", top: 0, background: "#fff", zIndex: 1 }}
+          style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center" }}
         >
           <h3 className="section-title">Balance Story (UTC+0)</h3>
           <div className="btn-row" style={{ gap: 8 }}>
-            <ExportPNG text={storyText} fileName="balance-story.png" width={1200} />
+            {tab === "narrative" && <button className="btn" onClick={() => copy(narrative)}>Copy Narrative</button>}
+            {tab === "audit" && <button className="btn" onClick={() => copy(auditText)}>Copy Audit</button>}
+            {tab === "raw" && <button className="btn" onClick={() => copy(rawPreview)}>Copy Raw</button>}
             <button className="btn" onClick={onClose}>Close</button>
           </div>
         </div>
 
+        {/* Tabs */}
         <div className="card" style={{ marginTop: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))", gap: 10 }}>
-            <label className="muted">
-              Start (UTC+0)
-              <input
-                className="btn"
-                style={{ width: "100%", textAlign: "left", marginTop: 6 }}
-                value={t0}
-                onChange={(e) => setT0(e.target.value)}
-                placeholder="YYYY-MM-DD HH:MM:SS"
-              />
-            </label>
-            <label className="muted">
-              End (UTC+0)
-              <input
-                className="btn"
-                style={{ width: "100%", textAlign: "left", marginTop: 6 }}
-                value={t1}
-                onChange={(e) => setT1(e.target.value)}
-                placeholder="YYYY-MM-DD HH:MM:SS"
-              />
-            </label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" onClick={() => setTab("narrative")} style={{ background: tab==="narrative" ? "#111827" : "#fff", color: tab==="narrative" ? "#fff" : undefined }}>Narrative</button>
+            <button className="btn" onClick={() => setTab("audit")} style={{ background: tab==="audit" ? "#111827" : "#fff", color: tab==="audit" ? "#fff" : undefined }}>Agent Audit</button>
+            <button className="btn" onClick={() => setTab("raw")} style={{ background: tab==="raw" ? "#111827" : "#fff", color: tab==="raw" ? "#fff" : undefined }}>Raw</button>
           </div>
         </div>
 
-        <div className="card" style={{ marginTop: 8 }}>
-          <h4 className="section-title" style={{ marginBottom: 8 }}>Preview</h4>
-          <pre
-            className="mono"
-            style={{
-              whiteSpace: "pre-wrap",
-              fontSize: 13,
-              lineHeight: "20px",
-              background: "#f7f7f9",
-              padding: 12,
-              borderRadius: 8,
-              maxHeight: 520,
-              overflow: "auto",
-            }}
-          >
-            {storyText}
-          </pre>
-        </div>
+        {/* Narrative */}
+        {tab === "narrative" && (
+          <div className="card" style={{ marginTop: 8 }}>
+            <h4 className="section-title" style={{ marginBottom: 8 }}>Narrative</h4>
+            <pre
+              className="mono"
+              style={{
+                whiteSpace: "pre-wrap",
+                fontSize: 13,
+                lineHeight: "20px",
+                background: "#f7f7f9",
+                padding: 12,
+                borderRadius: 8,
+                maxHeight: 560,
+                overflow: "auto",
+              }}
+            >
+              {narrative}
+            </pre>
+          </div>
+        )}
+
+        {/* Agent Audit */}
+        {tab === "audit" && (
+          <div className="card" style={{ marginTop: 8 }}>
+            <h4 className="section-title" style={{ marginBottom: 8 }}>Agent Audit</h4>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 10 }}>
+              <label className="muted">Anchor time (UTC+0)
+                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }} value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+              </label>
+              <label className="muted">End time (UTC+0, optional)
+                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }} value={end} onChange={(e)=>setEnd(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+              </label>
+            </div>
+
+            <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <label className="muted">Baseline balances (optional)
+                <textarea
+                  className="btn"
+                  style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
+                  placeholder={`One per line, e.g.\nUSDT 3450.12345678\nBTC 0.015`}
+                  value={baselineText}
+                  onChange={(e)=>setBaselineText(e.target.value)}
+                />
+              </label>
+              <div>
+                <div className="muted">Anchor transfer (optional)</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
+                  <input className="btn" placeholder="Asset (e.g. USDT)" value={anchorAsset} onChange={(e)=>setAnchorAsset(e.target.value)} />
+                  <input className="btn" placeholder="Amount (e.g. 2000 or -0.015)" value={anchorAmount} onChange={(e)=>setAnchorAmount(e.target.value)} />
+                </div>
+                <div className="muted small" style={{ marginTop: 6 }}>
+                  If provided, the transfer is applied on the baseline first (e.g., incoming +2000 USDT).
+                </div>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginTop: 10 }}>
+              <h4 className="section-title" style={{ marginBottom: 8 }}>Preview</h4>
+              <pre
+                className="mono"
+                style={{
+                  whiteSpace: "pre-wrap",
+                  fontSize: 13,
+                  lineHeight: "20px",
+                  background: "#f7f7f9",
+                  padding: 12,
+                  borderRadius: 8,
+                  maxHeight: 480,
+                  overflow: "auto",
+                }}
+              >
+                {auditText}
+              </pre>
+            </div>
+          </div>
+        )}
+
+        {/* Raw */}
+        {tab === "raw" && (
+          <div className="card" style={{ marginTop: 8 }}>
+            <h4 className="section-title" style={{ marginBottom: 8 }}>Raw</h4>
+            <pre
+              className="mono"
+              style={{
+                whiteSpace: "pre-wrap",
+                fontSize: 12,
+                lineHeight: "18px",
+                background: "#f7f7f9",
+                padding: 12,
+                borderRadius: 8,
+                maxHeight: 560,
+                overflow: "auto",
+              }}
+            >
+              {rawPreview}
+            </pre>
+          </div>
+        )}
+
       </div>
     </div>
   );
