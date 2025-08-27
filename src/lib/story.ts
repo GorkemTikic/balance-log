@@ -1,6 +1,5 @@
 // src/lib/story.ts
-// Utilities to generate human-friendly Balance Stories.
-// Tone: friendly but clear. No rounding; print numbers as-is.
+// Human-friendly Balance Stories (no rounding; all decimals kept)
 
 export type Row = {
   id: string;
@@ -8,8 +7,8 @@ export type Row = {
   asset: string;
   type: string;
   amount: number;
-  time: string;     // "YYYY-MM-DD HH:MM:SS" (UTC+0 normalized)
-  ts: number;       // Date.UTC(...)
+  time: string;   // "YYYY-MM-DD HH:MM:SS" (UTC+0)
+  ts: number;     // epoch ms (UTC)
   symbol: string;
   extra: string;
   raw: string;
@@ -58,23 +57,17 @@ const HUMAN: Record<string, string> = {
 function labelOf(type: string) {
   return HUMAN[type] || type.replace(/_/g, " ").replace(/\b([a-z])/g, (s) => s.toUpperCase());
 }
-
-function fmt(n: number) {
-  // No rounding by design; print raw number as string
-  return Number.isFinite(n) ? n.toString() : "0";
-}
+function fmt(n: number) { return Number.isFinite(n) ? n.toString() : "0"; }
 
 function sumByAsset(rows: Row[]): TotalsMap {
   const acc: TotalsMap = {};
   for (const r of rows) {
     const a = (acc[r.asset] ||= { pos: 0, neg: 0, net: 0 });
-    if (r.amount >= 0) a.pos += r.amount;
-    else a.neg += Math.abs(r.amount);
+    if (r.amount >= 0) a.pos += r.amount; else a.neg += Math.abs(r.amount);
     a.net += r.amount;
   }
   return acc;
 }
-
 function pruneZeros(map: TotalsMap): TotalsMap {
   const out: TotalsMap = {};
   for (const [asset, v] of Object.entries(map)) {
@@ -94,67 +87,93 @@ export function groupByType(rows: Row[]): Record<string, Row[]> {
   for (const [k, v] of m.entries()) out[k] = v;
   return out;
 }
-
 export function totalsByType(rows: Row[]): TotalsByType {
   const byType = groupByType(rows);
   const out: TotalsByType = {};
-  for (const [t, list] of Object.entries(byType)) {
-    out[t] = pruneZeros(sumByAsset(list));
-  }
+  for (const [t, list] of Object.entries(byType)) out[t] = pruneZeros(sumByAsset(list));
   return out;
 }
 
-/** Narrative (GPT-style) story: friendly, clear, includes ALL types present; hides +0/−0 lines. */
-export function buildNarrative(rows: Row[], t0?: string, t1?: string): string {
+type NarrativeOpts = {
+  includeTimeline?: boolean;       // default false
+  maxTimelinePerType?: number;     // default 8
+  includeTopSymbols?: boolean;     // default true
+  topSymbolsLimit?: number;        // default 6
+};
+
+/** Build a friendly, concise story. By default NO timeline, sadece özet + net etkiler. */
+export function buildNarrative(rows: Row[], t0?: string, t1?: string, opts?: NarrativeOpts): string {
+  const { includeTimeline = false, maxTimelinePerType = 8, includeTopSymbols = true, topSymbolsLimit = 6 } = opts || {};
   if (!rows?.length) return "No activity in the selected range.";
 
   const sorted = [...rows].sort((a, b) => a.ts - b.ts);
   const byType = groupByType(sorted);
 
+  // Basic stats
+  const symbols = new Set(sorted.map(r => r.symbol).filter(Boolean));
+  const typeKeys = Object.keys(byType).sort();
   const lines: string[] = [];
+
   lines.push("Balance Story");
   if (t0 || t1) lines.push(`Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`);
+  lines.push(`Activity summary: ${sorted.length} record(s), ${typeKeys.length} TYPE(s), ${symbols.size} symbol(s).`);
   lines.push("");
 
-  // Walk every type that actually appears in the data
-  const typeKeys = Object.keys(byType).sort();
+  // Optional: top symbols by absolute net across all rows
+  if (includeTopSymbols) {
+    const bySym = new Map<string, number>();
+    for (const r of sorted) bySym.set(r.symbol || "-", (bySym.get(r.symbol || "-") || 0) + r.amount);
+    const top = [...bySym.entries()]
+      .filter(([s]) => s !== "-" && s !== "")
+      .map(([s, v]) => [s, Math.abs(v), v] as [string, number, number])
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topSymbolsLimit);
+    if (top.length) {
+      lines.push("Top symbols by net impact:");
+      for (const [sym, , net] of top) lines.push(`  • ${sym}  = ${fmt(net as number)}`);
+      lines.push("");
+    }
+  }
+
+  // Per TYPE section (concise totals; timeline optional)
   for (const typeKey of typeKeys) {
     const label = labelOf(typeKey);
     const list = byType[typeKey];
 
-    // Summaries per asset (no zero-only rows)
+    // Totals per asset (skip pure-zero types)
     const totals = pruneZeros(sumByAsset(list));
     const assets = Object.keys(totals).sort();
+    if (!assets.length) continue;
 
-    // If nothing meaningful, skip the section entirely
-    if (assets.length === 0) continue;
+    lines.push(`${label}: (${list.length} record${list.length>1?"s":""})`);
 
-    lines.push(`${label}:`);
-
-    // Timeline bullets (concise, keep all decimals)
-    for (const r of list) {
-      if (r.amount === 0) continue;
-      // Example: 12:30:15 — +0.00421 USDT  (BTCUSDT)
-      const hh = r.time.split(" ")[1] || r.time;
-      const sign = r.amount >= 0 ? "+" : "−";
-      lines.push(`  • ${hh} — ${sign}${fmt(Math.abs(r.amount))} ${r.asset}${r.symbol ? `  (${r.symbol})` : ""}`);
-    }
-
-    // Totals block
-    lines.push("  = Totals:");
+    // Totals block (always)
     for (const a of assets) {
       const v = totals[a];
       const parts: string[] = [];
       if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
       if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
       parts.push(`= ${fmt(v.net)}`);
-      lines.push(`    • ${a}  ${parts.join("  ")}`);
+      lines.push(`  • ${a}  ${parts.join("  ")}`);
     }
+
+    // Optional short timeline sample (first N meaningful rows)
+    if (includeTimeline) {
+      let shown = 0;
+      for (const r of list) {
+        if (r.amount === 0) continue;
+        const sign = r.amount >= 0 ? "+" : "−";
+        lines.push(`    · ${r.time.split(" ")[1]} — ${sign}${fmt(Math.abs(r.amount))} ${r.asset}${r.symbol ? `  (${r.symbol})` : ""}`);
+        shown++;
+        if (shown >= maxTimelinePerType) { lines.push("    · …"); break; }
+      }
+    }
+
     lines.push("");
   }
 
-  // Grand totals across all types (by asset)
-  const grandTotals = pruneZeros(sumByAsset(rows));
+  // Overall effect across all types
+  const grandTotals = pruneZeros(sumByAsset(sorted));
   if (Object.keys(grandTotals).length) {
     lines.push("Overall Effect:");
     for (const [asset, v] of Object.entries(grandTotals).sort(([a], [b]) => a.localeCompare(b))) {
@@ -169,63 +188,42 @@ export function buildNarrative(rows: Row[], t0?: string, t1?: string): string {
   return lines.join("\n");
 }
 
-/** Agent audit input shape */
+/** Agent audit pieces (unchanged) */
 export type AuditInput = {
-  anchorTs: number;                    // required (UTC epoch ms)
-  endTs?: number;                      // optional: end boundary
-  baseline?: Record<string, number>;   // optional: balances BEFORE the anchor transfer
-  anchorTransfer?: { asset: string; amount: number }; // optional: apply this to baseline first
+  anchorTs: number;
+  endTs?: number;
+  baseline?: Record<string, number>;
+  anchorTransfer?: { asset: string; amount: number };
 };
 
-/** Agent-style audit: uses anchor time, optional baseline & transfer; then rolls forward. */
 export function buildAudit(rows: Row[], input: AuditInput): string {
   const { anchorTs, endTs, baseline, anchorTransfer } = input;
   const lines: string[] = [];
 
   lines.push("Agent Balance Audit");
-
-  // Focused range
   const from = anchorTs ?? -Infinity;
   const to = endTs ?? Infinity;
 
-  // If baseline is provided, compute post-transfer baseline first
   const before: Record<string, number> = { ...(baseline || {}) };
   if (anchorTransfer && anchorTransfer.asset) {
     before[anchorTransfer.asset] = (before[anchorTransfer.asset] || 0) + anchorTransfer.amount;
   }
 
-  // After-anchor activity
-  const tail = rows
-    .filter((r) => r.ts >= from && r.ts <= to)
-    .sort((a, b) => a.ts - b.ts);
-
-  // Roll-up deltas by asset
+  const tail = rows.filter((r) => r.ts >= from && r.ts <= to).sort((a, b) => a.ts - b.ts);
   const deltas = sumByAsset(tail);
   const deltasPruned = pruneZeros(deltas);
 
-  // Final expected balances
   const final: Record<string, number> = {};
-  const assets = new Set<string>([
-    ...Object.keys(before),
-    ...Object.keys(deltasPruned),
-  ]);
-  for (const a of assets) {
-    const base = before[a] || 0;
-    const d = deltasPruned[a] || { net: 0, pos: 0, neg: 0 };
-    final[a] = base + d.net;
-  }
+  const assets = new Set<string>([...Object.keys(before), ...Object.keys(deltasPruned)]);
+  for (const a of assets) final[a] = (before[a] || 0) + (deltasPruned[a]?.net || 0);
 
-  // Header
   lines.push(`Anchor (UTC+0): ${new Date(anchorTs).toISOString().replace("T", " ").replace("Z","")}`);
   if (endTs) lines.push(`End (UTC+0):    ${new Date(endTs).toISOString().replace("T", " ").replace("Z","")}`);
   lines.push("");
 
-  // Baseline & transfer explanation
   if (baseline && Object.keys(baseline).length) {
     lines.push("Baseline (before anchor):");
-    for (const [a, v] of Object.entries(baseline).sort(([x],[y]) => x.localeCompare(y))) {
-      lines.push(`  • ${a}  ${fmt(v)}`);
-    }
+    for (const [a, v] of Object.entries(baseline).sort(([x],[y]) => x.localeCompare(y))) lines.push(`  • ${a}  ${fmt(v)}`);
     if (anchorTransfer) {
       const s = anchorTransfer.amount >= 0 ? "+" : "−";
       lines.push(`Applied anchor transfer: ${s}${fmt(Math.abs(anchorTransfer.amount))} ${anchorTransfer.asset}`);
@@ -239,7 +237,6 @@ export function buildAudit(rows: Row[], input: AuditInput): string {
   }
   lines.push("");
 
-  // Activity after anchor (by type)
   if (tail.length) {
     lines.push("Activity after anchor:");
     const byType = groupByType(tail);
@@ -259,7 +256,6 @@ export function buildAudit(rows: Row[], input: AuditInput): string {
     lines.push("");
   }
 
-  // Deltas summary
   if (Object.keys(deltasPruned).length) {
     lines.push("Net effect (after anchor):");
     for (const [a, v] of Object.entries(deltasPruned).sort(([x],[y]) => x.localeCompare(y))) {
@@ -272,11 +268,8 @@ export function buildAudit(rows: Row[], input: AuditInput): string {
     lines.push("");
   }
 
-  // Final expected balances
   lines.push("Final expected balances:");
-  for (const a of [...assets].sort((x, y) => x.localeCompare(y))) {
-    lines.push(`  • ${a}  ${fmt(final[a])}`);
-  }
+  for (const a of [...assets].sort((x, y) => x.localeCompare(y))) lines.push(`  • ${a}  ${fmt(final[a])}`);
 
   return lines.join("\n");
 }
