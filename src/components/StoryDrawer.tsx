@@ -22,16 +22,7 @@ export default function StoryDrawer({
 }) {
   const [tab, setTab] = useState<"narrative" | "audit" | "raw">("narrative");
 
-  // Narrative options
-  const [showTimeline, setShowTimeline] = useState(false);
-  const [timelinePerType, setTimelinePerType] = useState(8);
-
-  const narrative = useMemo(
-    () => buildNarrative(rows, t0, t1, { includeTimeline: showTimeline, maxTimelinePerType: timelinePerType }),
-    [rows, t0, t1, showTimeline, timelinePerType]
-  );
-
-  // -------- Agent Audit state & parsers (same as before) --------
+  // -------- Shared (Audit inputs; Narrative isteğe bağlı bunları kullanır) --------
   const [anchor, setAnchor] = useState<string>("");
   const [end, setEnd] = useState<string>("");
   const [baselineText, setBaselineText] = useState<string>("");
@@ -78,6 +69,23 @@ export default function StoryDrawer({
   const baselineParsed = useMemo(() => parseBaseline(baselineText), [baselineText]);
   const transferParsed = useMemo(() => parseTransfer(trAmount, trAsset), [trAmount, trAsset]);
 
+  // -------- Narrative options --------
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [timelinePerType, setTimelinePerType] = useState(8);
+  const [useBaselineInNarrative, setUseBaselineInNarrative] = useState(true);
+
+  const narrative = useMemo(
+    () =>
+      buildNarrative(rows, t0, t1, {
+        includeTimeline: showTimeline,
+        maxTimelinePerType: timelinePerType,
+        initialBalances: useBaselineInNarrative ? baselineParsed.map : undefined,
+        anchorTransfer: useBaselineInNarrative ? transferParsed : undefined,
+      }),
+    [rows, t0, t1, showTimeline, timelinePerType, useBaselineInNarrative, baselineParsed.map, transferParsed]
+  );
+
+  // -------- Audit preview --------
   const auditText = useMemo(() => {
     const anchorTs = anchor ? parseUTC(anchor) : undefined;
     if (!anchorTs) return "Set an Anchor time (UTC+0) to run the audit.";
@@ -89,7 +97,7 @@ export default function StoryDrawer({
     }
   }, [anchor, end, rows, baselineParsed.map, transferParsed]);
 
-  // Raw preview (diagnostics)
+  // -------- Raw (diagnostic) --------
   const rawPreview = useMemo(() => {
     const t = totalsByType(rows);
     const lines: string[] = [];
@@ -113,17 +121,11 @@ export default function StoryDrawer({
   if (!open) return null;
 
   return (
-    <div
-      aria-modal
-      role="dialog"
-      onClick={onClose}
-      style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,0.25)", display: "flex", justifyContent: "flex-end" }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="card"
-        style={{ width: "min(820px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}
-      >
+    <div aria-modal role="dialog" onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,0.25)", display: "flex", justifyContent: "flex-end" }}>
+      <div onClick={(e) => e.stopPropagation()} className="card"
+        style={{ width: "min(820px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
+
         {/* Header */}
         <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center" }}>
           <h3 className="section-title">Balance Story (UTC+0)</h3>
@@ -144,7 +146,7 @@ export default function StoryDrawer({
           </div>
         </div>
 
-        {/* Narrative (concise story) */}
+        {/* Narrative */}
         {tab === "narrative" && (
           <div className="card" style={{ marginTop: 8 }}>
             <h4 className="section-title" style={{ marginBottom: 8 }}>Narrative</h4>
@@ -157,18 +159,18 @@ export default function StoryDrawer({
               {showTimeline && (
                 <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   Max items/type
-                  <input
-                    className="btn"
-                    style={{ width: 100, textAlign: "left" }}
-                    value={timelinePerType}
-                    onChange={(e)=>setTimelinePerType(Math.max(1, Math.min(50, Number(e.target.value)||8)))}
-                  />
+                  <input className="btn" style={{ width: 100, textAlign: "left" }}
+                         value={timelinePerType}
+                         onChange={(e)=>setTimelinePerType(Math.max(1, Math.min(50, Number(e.target.value)||8)))} />
                 </label>
               )}
+              <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input type="checkbox" checked={useBaselineInNarrative} onChange={(e)=>setUseBaselineInNarrative(e.target.checked)} />
+                Include baseline & transfer
+              </label>
             </div>
 
-            <pre className="mono"
-              style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: "20px", background: "#f7f7f9", padding: 12, borderRadius: 8, maxHeight: 560, overflow: "auto" }}>
+            <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: "20px", background: "#f7f7f9", padding: 12, borderRadius: 8, maxHeight: 560, overflow: "auto" }}>
               {narrative}
             </pre>
           </div>
@@ -181,30 +183,27 @@ export default function StoryDrawer({
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 10 }}>
               <label className="muted">Anchor time (UTC+0)
-                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }} value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
+                       value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </label>
               <label className="muted">End time (UTC+0, optional)
-                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }} value={end} onChange={(e)=>setEnd(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
+                       value={end} onChange={(e)=>setEnd(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </label>
             </div>
 
             <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <label className="muted">Baseline balances (optional)
-                <textarea
-                  className="btn"
+                <textarea className="btn"
                   style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
                   placeholder={`One per line (both orders allowed):\nUSDT 3450.12345678\n0.015 BTC`}
-                  value={baselineText}
-                  onChange={(e)=>setBaselineText(e.target.value)}
-                />
+                  value={baselineText} onChange={(e)=>setBaselineText(e.target.value)} />
                 <div className="small muted" style={{ marginTop: 6 }}>
-                  {/* Baseline parse hint/preview */}
-                  {(() => {
-                    const p = baselineParsed;
-                    if (p?.error) return <span style={{ color: "#b91c1c" }}>{p.error}</span>;
-                    if (p?.map) return <>Parsed baseline: {p.preview?.join(", ")}</>;
-                    return <>Tip: e.g. <b>USDT 3450.12</b> or <b>3450.12 USDT</b></>;
-                  })()}
+                  {baselineParsed?.error
+                    ? <span style={{ color: "#b91c1c" }}>{baselineParsed.error}</span>
+                    : baselineParsed?.map
+                      ? <>Parsed baseline: {baselineParsed.preview?.join(", ")}</>
+                      : <>Tip: e.g. <b>USDT 3450.12</b> or <b>3450.12 USDT</b></>}
                 </div>
               </label>
 
@@ -235,15 +234,4 @@ export default function StoryDrawer({
         {/* Raw */}
         {tab === "raw" && (
           <div className="card" style={{ marginTop: 8 }}>
-            <h4 className="section-title" style={{ marginBottom: 8 }}>Raw</h4>
-            <pre className="mono"
-              style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: "18px", background: "#f7f7f9", padding: 12, borderRadius: 8, maxHeight: 560, overflow: "auto" }}>
-              {rawPreview}
-            </pre>
-          </div>
-        )}
-
-      </div>
-    </div>
-  );
-}
+            <h4 className="section-title" style={{
