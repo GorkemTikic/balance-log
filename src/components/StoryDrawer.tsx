@@ -12,21 +12,16 @@ export default function StoryDrawer({
   open,
   onClose,
   rows,
-  t0,
-  t1,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
-  t0?: string;
-  t1?: string;
 }) {
   const [tab, setTab] = useState<"narrative" | "audit" | "charts" | "raw">("narrative");
 
-  // ---- Shared inputs (Audit & Narrative use these) ----
+  // ---- Shared inputs ----
   const [anchor, setAnchor] = useState<string>("");
   const [end, setEnd] = useState<string>("");
-
   const [baselineText, setBaselineText] = useState<string>("");
   const [trAmount, setTrAmount] = useState<string>("");
   const [trAsset, setTrAsset] = useState<string>("");
@@ -68,7 +63,7 @@ export default function StoryDrawer({
   const baselineParsed = useMemo(() => parseBaseline(baselineText), [baselineText]);
   const transferParsed = useMemo(() => parseTransfer(trAmount, trAsset), [trAmount, trAsset]);
 
-  // ---- Narrative (English, paragraphs) ----
+  // ---- Narrative ----
   const anchorISO = useMemo(() => {
     const ts = anchor ? parseUTC(anchor) : undefined;
     if (!ts) return undefined;
@@ -79,10 +74,10 @@ export default function StoryDrawer({
     buildNarrativeParagraphs(rows, anchorISO, { initialBalances: baselineParsed.map, anchorTransfer: transferParsed }),
   [rows, anchorISO, baselineParsed.map, transferParsed]);
 
-  // Summary rows for colored table + icons
+  // Summary rows
   const summaryRows: SummaryRow[] = useMemo(() => buildSummaryRows(rows), [rows]);
 
-  // ---- Audit (technical) ----
+  // ---- Audit ----
   const auditText = useMemo(() => {
     const anchorTs = anchor ? parseUTC(anchor) : undefined;
     if (!anchorTs) return "Set an Anchor time (UTC+0) to run the audit.";
@@ -132,7 +127,7 @@ export default function StoryDrawer({
     }
   }
 
-  // -------------------- Charts (pure SVG, no deps) --------------------
+  // -------------------- Charts data (unchanged) --------------------
   const dailySeries = useMemo(() => buildDailyNet(rows), [rows]);
   const assetNets = useMemo(() => buildAssetNet(rows), [rows]);
 
@@ -145,9 +140,9 @@ export default function StoryDrawer({
         style={{ width: "min(980px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
 
         {/* Header */}
-        <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center" }}>
+        <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <h3 className="section-title">Balance Story (UTC+0)</h3>
-          <div className="btn-row" style={{ gap: 8 }}>
+          <div className="btn-row" style={{ gap: 8, flexWrap: "wrap" }}>
             {tab === "narrative" && <button className="btn" onClick={() => copy(narrativeText)}>Copy Story</button>}
             {tab === "audit" &&     <button className="btn" onClick={() => copy(auditText)}>Copy Audit</button>}
             {tab === "raw" &&       <button className="btn" onClick={() => copy(rawPreview)}>Copy Raw</button>}
@@ -165,26 +160,52 @@ export default function StoryDrawer({
           </div>
         </div>
 
-        {/* Narrative (paragraphs) */}
+        {/* Narrative */}
         {tab === "narrative" && (
           <div className="card" style={{ marginTop: 8 }}>
-            {/* Inputs row */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 10 }}>
-              <label className="muted">Anchor time (UTC+0)
-                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
-                  value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+            {/* Inputs row (RESPONSIVE FIX) */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: 10,
+                alignItems: "start",
+              }}
+            >
+              <label className="muted" style={{ minWidth: 0 }}>
+                Anchor time (UTC+0)
+                <input
+                  className="btn"
+                  style={inputStyle}
+                  value={anchor}
+                  onChange={(e)=>setAnchor(e.target.value)}
+                  placeholder="YYYY-MM-DD HH:MM:SS"
+                />
               </label>
-              <label className="muted">Baseline balances (optional)
-                <textarea className="btn"
-                  style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 64, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
+
+              <label className="muted" style={{ minWidth: 0 }}>
+                Baseline balances (optional)
+                <textarea
+                  className="btn"
+                  style={{ ...inputStyle, minHeight: 64, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
                   placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
-                  value={baselineText} onChange={(e)=>setBaselineText(e.target.value)} />
+                  value={baselineText}
+                  onChange={(e)=>setBaselineText(e.target.value)}
+                />
               </label>
-              <div>
+
+              <div style={{ minWidth: 0 }}>
                 <div className="muted">Anchor transfer (optional)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
-                  <input className="btn" placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
-                  <input className="btn" placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)",
+                    gap: 8,
+                    marginTop: 6,
+                  }}
+                >
+                  <input className="btn" style={inputStyle} placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
+                  <input className="btn" style={inputStyle} placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
                 </div>
               </div>
             </div>
@@ -199,7 +220,7 @@ export default function StoryDrawer({
 
             {/* Summary table + Export PNG */}
             <div className="card" style={{ marginTop: 10 }}>
-              <div className="section-head" style={{ alignItems: "center" }}>
+              <div className="section-head" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                 <h4 className="section-title">Summary (by Type & Asset)</h4>
                 <div className="btn-row">
                   <button className="btn" onClick={exportSummaryPng}>Export Summary PNG</button>
@@ -245,29 +266,29 @@ export default function StoryDrawer({
           <div className="card" style={{ marginTop: 8 }}>
             <h4 className="section-title" style={{ marginBottom: 8 }}>Agent Audit</h4>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 10 }}>
-              <label className="muted">Anchor time (UTC+0)
-                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
-                       value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))", gap: 10, alignItems: "start" }}>
+              <label className="muted" style={{ minWidth: 0 }}>
+                Anchor time (UTC+0)
+                <input className="btn" style={inputStyle} value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </label>
-              <label className="muted">End time (UTC+0, optional)
-                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
-                       value={end} onChange={(e)=>setEnd(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+              <label className="muted" style={{ minWidth: 0 }}>
+                End time (UTC+0, optional)
+                <input className="btn" style={inputStyle} value={end} onChange={(e)=>setEnd(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </label>
             </div>
 
             <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <label className="muted">Baseline balances (optional)
-                <textarea className="btn"
-                  style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
+              <label className="muted" style={{ minWidth: 0 }}>
+                Baseline balances (optional)
+                <textarea className="btn" style={{ ...inputStyle, minHeight: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
                   placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
                   value={baselineText} onChange={(e)=>setBaselineText(e.target.value)} />
               </label>
-              <div>
+              <div style={{ minWidth: 0 }}>
                 <div className="muted">Anchor transfer (optional)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
-                  <input className="btn" placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
-                  <input className="btn" placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)", gap: 8, marginTop: 6 }}>
+                  <input className="btn" style={inputStyle} placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
+                  <input className="btn" style={inputStyle} placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
                 </div>
               </div>
             </div>
@@ -286,16 +307,12 @@ export default function StoryDrawer({
         {tab === "charts" && (
           <div className="card" style={{ marginTop: 8 }}>
             <h4 className="section-title" style={{ marginBottom: 8 }}>Charts</h4>
-
-            {/* Daily Net Change (UTC+0) */}
             <div className="card" style={{ marginTop: 8 }}>
               <div className="section-head" style={{ alignItems: "center" }}>
                 <h4 className="section-title">Daily Net Change (All assets)</h4>
               </div>
               <ChartLine data={dailySeries} height={240} />
             </div>
-
-            {/* Net by Asset (Top 12 by absolute net) */}
             <div className="card" style={{ marginTop: 8 }}>
               <div className="section-head" style={{ alignItems: "center" }}>
                 <h4 className="section-title">Net by Asset (Top 12)</h4>
@@ -333,6 +350,17 @@ const tdStyleLeft: React.CSSProperties = { ...tdBase, fontWeight: 500 };
 const tdStyleMono: React.CSSProperties = { ...tdBase, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" };
 const tdStyleMonoBold: React.CSSProperties = { ...tdStyleMono, fontWeight: 700 };
 
+// Shared input style to prevent clipping and force responsiveness
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  textAlign: "left",
+  marginTop: 6,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 /* ---------------- Icons ---------------- */
 function assetIcon(asset: string) {
   const a = asset.toUpperCase();
@@ -349,57 +377,45 @@ function assetIcon(asset: string) {
 }
 
 /* ---------------- Charts utils ---------------- */
-type XY = { x: number; y: number };
 type LinePoint = { label: string; value: number };
+type BarDatum = { asset: string; net: number };
 
 function buildDailyNet(rows: Row[]): LinePoint[] {
   if (!rows?.length) return [];
-  // group by UTC date (YYYY-MM-DD)
   const map = new Map<string, number>();
   for (const r of rows) {
-    const d = r.time.split(" ")[0]; // "YYYY-MM-DD"
+    const d = r.time.split(" ")[0];
     map.set(d, (map.get(d) || 0) + r.amount);
   }
   const arr = Array.from(map.entries()).sort(([a],[b]) => (a < b ? -1 : 1));
-  // cumulative net per day for smoother line (optional you can switch to pure daily)
   let cum = 0;
   return arr.map(([d, v]) => { cum += v; return { label: d, value: cum }; });
 }
 
-type BarDatum = { asset: string; net: number };
-
 function buildAssetNet(rows: Row[]): BarDatum[] {
   if (!rows?.length) return [];
   const map = new Map<string, number>();
-  for (const r of rows) {
-    map.set(r.asset, (map.get(r.asset) || 0) + r.amount);
-  }
+  for (const r of rows) map.set(r.asset, (map.get(r.asset) || 0) + r.amount);
   const arr = Array.from(map.entries()).map(([asset, net]) => ({ asset, net }));
-  // top 12 by abs value
   arr.sort((a,b) => Math.abs(b.net) - Math.abs(a.net));
   return arr.slice(0, 12);
 }
 
-/* ---------------- Line Chart (SVG) ---------------- */
+/* ---------------- Line Chart ---------------- */
 function ChartLine({ data, height = 240 }: { data: LinePoint[]; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(760);
   useEffect(() => {
-    const obs = new ResizeObserver(() => {
-      if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24));
-    });
+    const obs = new ResizeObserver(() => { if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24)); });
     if (ref.current) obs.observe(ref.current);
     return () => obs.disconnect();
   }, []);
   const pad = { t: 12, r: 12, b: 28, l: 44 };
-  const width = w;
-  const h = height;
+  const width = w, h = height;
   const innerW = width - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
 
-  if (!data.length) {
-    return <div ref={ref} style={{ padding: 12, color: "#6b7280" }}>No data</div>;
-  }
+  if (!data.length) return <div ref={ref} style={{ padding: 12, color: "#6b7280" }}>No data</div>;
 
   const minY = Math.min(0, Math.min(...data.map(d => d.value)));
   const maxY = Math.max(0, Math.max(...data.map(d => d.value)));
@@ -412,20 +428,13 @@ function ChartLine({ data, height = 240 }: { data: LinePoint[]; height?: number 
   return (
     <div ref={ref} style={{ overflow: "hidden" }}>
       <svg width={width} height={h}>
-        {/* axes */}
         <line x1={pad.l} y1={zeroY} x2={width - pad.r} y2={zeroY} stroke="#e5e7eb" />
         <line x1={pad.l} y1={pad.t} x2={pad.l} y2={h - pad.b} stroke="#e5e7eb" />
-        {/* path */}
         <path d={path} fill="none" stroke="#2563eb" strokeWidth={2} />
-        {/* points */}
-        {data.map((d, i) => (
-          <circle key={i} cx={xScale(i)} cy={yScale(d.value)} r={2.5} fill="#2563eb" />
-        ))}
-        {/* labels (x) */}
+        {data.map((d, i) => (<circle key={i} cx={xScale(i)} cy={yScale(d.value)} r={2.5} fill="#2563eb" />))}
         {data.map((d, i) => (i % Math.ceil(data.length / 6) === 0) && (
           <text key={"x"+i} x={xScale(i)} y={h - 8} textAnchor="middle" fontSize="11" fill="#6b7280">{d.label.slice(5)}</text>
         ))}
-        {/* labels (y) */}
         {[minY, (minY+maxY)/2, maxY].map((val, i) => (
           <g key={"y"+i}>
             <text x={8} y={yScale(val)+4} fontSize="11" fill="#6b7280">{val.toFixed(6).replace(/\.?0+$/,"")}</text>
@@ -437,14 +446,12 @@ function ChartLine({ data, height = 240 }: { data: LinePoint[]; height?: number 
   );
 }
 
-/* ---------------- Bar Chart (SVG) ---------------- */
-function ChartBars({ data, height = 280 }: { data: BarDatum[]; height?: number }) {
+/* ---------------- Bar Chart ---------------- */
+function ChartBars({ data, height = 280 }: { data: { asset: string; net: number }[]; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(760);
   useEffect(() => {
-    const obs = new ResizeObserver(() => {
-      if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24));
-    });
+    const obs = new ResizeObserver(() => { if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24)); });
     if (ref.current) obs.observe(ref.current);
     return () => obs.disconnect();
   }, []);
@@ -461,7 +468,6 @@ function ChartBars({ data, height = 280 }: { data: BarDatum[]; height?: number }
   return (
     <div ref={ref} style={{ overflow: "hidden" }}>
       <svg width={width} height={height}>
-        {/* zero line */}
         <line x1={pad.l} y1={pad.t + innerH/2} x2={width - pad.r} y2={pad.t + innerH/2} stroke="#e5e7eb" />
         {data.map((d, i) => {
           const x = pad.l + i * (innerW / data.length) + 4;
@@ -477,7 +483,6 @@ function ChartBars({ data, height = 280 }: { data: BarDatum[]; height?: number }
             </g>
           );
         })}
-        {/* y labels (approx) */}
         {[maxAbs, 0, -maxAbs].map((v, idx) => (
           <text key={idx} x={8} y={pad.t + innerH/2 - (v/maxAbs)*(innerH/2) + 4} fontSize="11" fill="#6b7280">
             {v.toFixed(6).replace(/\.?0+$/,"")}
