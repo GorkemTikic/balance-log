@@ -9,9 +9,10 @@ import RpnTable from "@/components/RpnTable";
 import Tabs, { TabKey } from "@/components/Tabs";
 import KpiStat from "@/components/KpiStat";
 import TypeFilter from "@/components/TypeFilter";
+import { Row as StoryRow } from "@/components/StoryDrawer";
 
-type Row = { id:string; uid:string; asset:string; type:string; amount:number; time:string; ts:number; symbol:string; extra:string; raw:string; };
-type TotalsMap = Record<string, { pos:number; neg:number; net:number }>;
+type Row = StoryRow;
+type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
 type TotalsByType = Record<string, TotalsMap>;
 
 function useLocalStorage<T>(key: string, initial: T) {
@@ -80,8 +81,6 @@ export default function App(){
 
   const [tab, setTab] = useState<TabKey>("summary");
   const [drawerOpen, setDrawerOpen] = useLocalStorage<boolean>("bl.story.open", false);
-  const [storyT0, setStoryT0] = useLocalStorage<string>("bl.story.t0", "");
-  const [storyT1, setStoryT1] = useLocalStorage<string>("bl.story.t1", "");
 
   function runParse(tsv: string){
     try { const rs = parseBalanceLog(tsv); setRows(rs); setError(rs.length? "" : "No valid rows detected."); }
@@ -112,7 +111,24 @@ export default function App(){
 
   const totalsByType = useMemo(()=> groupByTypeAndAsset(rows), [rows]);
 
-  // === UPDATED: groupSwaps — hide "Out: 0" / "In: 0" and drop empty events
+  // Swaps/events (mevcut ekranlar için)
+  const coinSwapLines = useMemo(()=> groupSwaps(rows, "COIN_SWAP"), [rows]);
+  const autoExLines   = useMemo(()=> groupSwaps(rows, "AUTO_EXCHANGE"), [rows]);
+  const eventsOrdersByAsset  = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_ORDER")),  [rows]);
+  const eventsPayoutsByAsset = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_PAYOUT")), [rows]);
+
+  // KPI’lar
+  const kpiTotal = rawRows.length;
+  const kpiFiltered = rows.length;
+  const kpiSymbols = new Set(rows.map(r=>r.symbol).filter(Boolean)).size;
+
+  // Sıralama: büyüklüğe göre
+  const typeOrder = useMemo(() => {
+    const entries = Object.entries(totalsByType);
+    const magnitude = (m: TotalsMap) => Object.values(m).reduce((a, v) => a + Math.abs(v.net) + v.pos + v.neg, 0);
+    return entries.sort((a,b)=> magnitude(b[1]) - magnitude(a[1]));
+  }, [totalsByType]);
+
   function groupSwaps(lines: Row[], kind: "COIN_SWAP"|"AUTO_EXCHANGE"){
     const matcher = kind === "COIN_SWAP" ? (t:string)=> t.includes("COIN_SWAP") : (t:string)=> t === "AUTO_EXCHANGE";
     const filtered = lines.filter(r => matcher(r.type));
@@ -128,9 +144,7 @@ export default function App(){
         if(amt < 0) outs.push(`−${Math.abs(amt)} ${asset}`);
         if(amt > 0) ins.push(`+${amt} ${asset}`);
       }
-      // If no outs and no ins, skip the line entirely
       if (outs.length === 0 && ins.length === 0) continue;
-
       const parts: string[] = [];
       if (outs.length) parts.push(`Out: ${outs.join(", ")}`);
       if (ins.length)  parts.push(`In: ${ins.join(", ")}`);
@@ -139,31 +153,15 @@ export default function App(){
     out.sort((a,b)=>a.ts-b.ts);
     return out;
   }
-  // === END UPDATED
 
-  const coinSwapLines = useMemo(()=> groupSwaps(rows, "COIN_SWAP"), [rows]);
-  const autoExLines   = useMemo(()=> groupSwaps(rows, "AUTO_EXCHANGE"), [rows]);
+  const selectAllTypes = () => setSelectedTypes([]); // empty = all on
 
-  const eventsOrdersByAsset  = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_ORDER")),  [rows]);
-  const eventsPayoutsByAsset = useMemo(()=> sumByAsset(rows.filter(r=> r.type === "EVENT_CONTRACTS_PAYOUT")), [rows]);
-
-  const kpiTotal = rawRows.length;
-  const kpiFiltered = rows.length;
-  const kpiSymbols = new Set(rows.map(r=>r.symbol).filter(Boolean)).size;
-
-  const typeOrder = useMemo(() => {
-    const entries = Object.entries(totalsByType);
-    const magnitude = (m: TotalsMap) => Object.values(m).reduce((a, v) => a + Math.abs(v.net) + v.pos + v.neg, 0);
-    return entries.sort((a,b)=> magnitude(b[1]) - magnitude(a[1]));
-  }, [totalsByType]);
-
-  const selectAllTypes = () => setSelectedTypes([]);                 // empty = all on
   return (
     <div className="container">
       <header className="header">
         <div>
           <h1 className="title">Balance Log Analyzer</h1>
-          <div className="subtitle">All dynamic TYPEs included • Full-precision amounts</div>
+          <div className="subtitle">Narrative & Audit • All dynamic TYPEs • Full precision</div>
         </div>
         <div className="toolbar">
           <button className="btn btn-dark" onClick={()=>setDrawerOpen(true)}>Open Balance Story</button>
@@ -237,11 +235,9 @@ export default function App(){
       <StoryDrawer
         open={drawerOpen}
         onClose={()=>setDrawerOpen(false)}
-        t0={storyT0}
-        t1={storyT1}
-        setT0={setStoryT0}
-        setT1={setStoryT1}
-        totalsByType={totalsByType}
+        rows={rows}
+        t0={filters.t0}
+        t1={filters.t1}
       />
     </div>
   );
