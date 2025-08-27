@@ -25,6 +25,7 @@ export default function StoryDrawer({
   const [baselineText, setBaselineText] = useState<string>("");
   const [trAmount, setTrAmount] = useState<string>("");
   const [trAsset, setTrAsset] = useState<string>("");
+  const [lang, setLang] = useState<"en"|"tr"|"ar"|"vi"|"ru">("en");
 
   function parseUTC(s: string): number | undefined {
     const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
@@ -71,8 +72,12 @@ export default function StoryDrawer({
   }, [anchor]);
 
   const narrativeText = useMemo(() =>
-    buildNarrativeParagraphs(rows, anchorISO, { initialBalances: baselineParsed.map, anchorTransfer: transferParsed }),
-  [rows, anchorISO, baselineParsed.map, transferParsed]);
+    buildNarrativeParagraphs(rows, anchorISO, {
+      initialBalances: baselineParsed.map,
+      anchorTransfer: transferParsed,
+      lang,
+    }),
+  [rows, anchorISO, baselineParsed.map, transferParsed, lang]);
 
   // Summary rows
   const summaryRows: SummaryRow[] = useMemo(() => buildSummaryRows(rows), [rows]);
@@ -127,7 +132,7 @@ export default function StoryDrawer({
     }
   }
 
-  // -------------------- Charts data (unchanged) --------------------
+  // -------------------- Charts data (simple) --------------------
   const dailySeries = useMemo(() => buildDailyNet(rows), [rows]);
   const assetNets = useMemo(() => buildAssetNet(rows), [rows]);
 
@@ -143,6 +148,14 @@ export default function StoryDrawer({
         <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <h3 className="section-title">Balance Story (UTC+0)</h3>
           <div className="btn-row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <select className="btn" value={lang} onChange={(e)=>setLang(e.target.value as any)} title="Language"
+              style={{ paddingRight: 28 }}>
+              <option value="en">English</option>
+              <option value="tr">Türkçe</option>
+              <option value="ar">العربية</option>
+              <option value="vi">Tiếng Việt</option>
+              <option value="ru">Русский</option>
+            </select>
             {tab === "narrative" && <button className="btn" onClick={() => copy(narrativeText)}>Copy Story</button>}
             {tab === "audit" &&     <button className="btn" onClick={() => copy(auditText)}>Copy Audit</button>}
             {tab === "raw" &&       <button className="btn" onClick={() => copy(rawPreview)}>Copy Raw</button>}
@@ -163,7 +176,7 @@ export default function StoryDrawer({
         {/* Narrative */}
         {tab === "narrative" && (
           <div className="card" style={{ marginTop: 8 }}>
-            {/* Inputs row (RESPONSIVE FIX) */}
+            {/* Inputs row (responsive, prevents right-side clipping) */}
             <div
               style={{
                 display: "grid",
@@ -222,7 +235,7 @@ export default function StoryDrawer({
             <div className="card" style={{ marginTop: 10 }}>
               <div className="section-head" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                 <h4 className="section-title">Summary (by Type & Asset)</h4>
-                <div className="btn-row">
+                <div className="btn-row" style={{ gap: 8, flexWrap: "wrap" }}>
                   <button className="btn" onClick={exportSummaryPng}>Export Summary PNG</button>
                 </div>
               </div>
