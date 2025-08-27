@@ -1,56 +1,56 @@
 // src/lib/story.ts
-// Single source of truth for Balance Story + Agent Audit.
-// - sums with full precision-ish (JS Number) without rounding/formatting
-// - avoids printing “-0” by using epsilon
-// - hides tiny dust balances for BFUSD/FDUSD/LDUSDT in "final expected"
+// Balance Story engine — single source of truth for both Narrative and Agent Audit.
+// Features:
+// - Full-precision arithmetic (JS number) without display rounding
+// - Avoid printing “-0” with EPS
+// - Hides tiny “dust” finals for BFUSD/FDUSD/LDUSDT when requested
+// - Per-TYPE aggregation, friendly section labels, “Other Transactions” funnel
+// - Builds summary table rows for UI (Type, Asset, In, Out, Net)
 
 export type Row = {
   id?: string;
   type: string;
   asset: string;
-  amount: number; // positive=in, negative=out (as pasted)
+  amount: number; // positive=in, negative=out
   ts?: number;    // epoch ms (UTC)
-  time?: string;  // raw time string if any
+  time?: string;  // original string
   symbol?: string;
   extra?: string;
 };
 
 export type Baseline = Record<string, number>;
-
 export type AnchorTransfer = { amount: number; asset: string } | null;
 
 const EPS = 1e-12;
-const DUST: Record<string, number> = {
-  BFUSD: 1e-7,
-  FDUSD: 1e-7,
-  LDUSDT: 1e-7,
-};
+const DUST: Record<string, number> = { BFUSD: 1e-7, FDUSD: 1e-7, LDUSDT: 1e-7 };
 
 export function nearlyZero(n: number) {
   return Math.abs(n) < EPS;
 }
-
 export function isDust(asset: string, n: number) {
   const lim = DUST[asset.toUpperCase()];
   return lim !== undefined && Math.abs(n) < lim;
 }
-
 export function safeAdd(a: number, b: number) {
-  return a + b; // keep raw precision; caller never rounds
+  return a + b; // keep raw
 }
 
 export function parseBaselineText(text: string): Baseline {
-  // Expects lines like: "USDT 3450.12345678"
   const out: Baseline = {};
   (text || "")
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean)
     .forEach((line) => {
-      const m = line.match(/^([A-Za-z0-9_]+)\s+([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i);
+      // "USDT 3450.123", "0.1 BTC"
+      const m =
+        line.match(/^([A-Za-z0-9_]+)\s+([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i) ||
+        line.match(/^([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+([A-Za-z0-9_]+)/i);
       if (m) {
-        const asset = m[1].toUpperCase();
-        const amt = Number(m[2]);
+        const a = isNaN(Number(m[1])) ? m[1] : m[2];
+        const v = isNaN(Number(m[1])) ? m[2] : m[1];
+        const asset = a.toUpperCase();
+        const amt = Number(v);
         if (!Number.isNaN(amt)) out[asset] = amt;
       }
     });
@@ -58,11 +58,8 @@ export function parseBaselineText(text: string): Baseline {
 }
 
 export function aggregateByTypeAsset(rows: Row[]) {
-  // return: { [type]: { [asset]: {in, out, net, count} } }
-  const map: Record<
-    string,
-    Record<string, { in: number; out: number; net: number; count: number }>
-  > = {};
+  const map: Record<string, Record<string, { in: number; out: number; net: number; count: number }>> =
+    {};
   for (const r of rows) {
     const type = r.type;
     const asset = r.asset.toUpperCase();
@@ -78,14 +75,11 @@ export function aggregateByTypeAsset(rows: Row[]) {
 
 export function netByAsset(rows: Row[]) {
   const acc: Record<string, number> = {};
-  for (const r of rows) {
-    const k = r.asset.toUpperCase();
-    acc[k] = safeAdd(acc[k] ?? 0, r.amount);
-  }
+  for (const r of rows) acc[r.asset.toUpperCase()] = safeAdd(acc[r.asset.toUpperCase()] ?? 0, r.amount);
   return acc;
 }
 
-// ---- Friendly section names & routing --------------------------------------
+// ---- Friendly labels & order ------------------------------------------------
 
 export const SECTION_LABELS: Record<string, string> = {
   REALIZED_PNL: "Realized Profit / Loss",
@@ -95,7 +89,7 @@ export const SECTION_LABELS: Record<string, string> = {
   LIQUIDATION_FEE: "Liquidation / Insurance Clearance",
 
   REFERRAL_KICKBACK: "Referral Incomes",
-  COMISSION_REBATE: "Trading Fee Rebates", // (spelling as in source)
+  COMISSION_REBATE: "Trading Fee Rebates",
   CASH_COUPON: "Gift Money",
 
   POSITION_LIMIT_INCREASE_FEE: "Position Limit Increase Fee",
@@ -115,7 +109,7 @@ export const SECTION_LABELS: Record<string, string> = {
   BFUSD_REWARD: "BFUSD Rewards",
 };
 
-const ORDER: string[] = [
+export const ORDER: string[] = [
   "REALIZED_PNL",
   "COMMISSION",
   "FUNDING_FEE",
@@ -143,61 +137,33 @@ const ORDER: string[] = [
   "BFUSD_REWARD",
 ];
 
-function fmtLine(parts: Array<string | false | null | undefined>) {
-  // join non-empty parts with "  —  "
-  return parts.filter(Boolean).join("  —  ");
-}
-
-function fmtIO(asset: string, vIn: number, vOut: number) {
-  const segs: string[] = [];
-  if (!nearlyZero(vIn)) segs.push(`${asset} +${vIn}`);
-  if (!nearlyZero(vOut)) segs.push(`${asset} -${vOut}`);
-  if (segs.length === 0) return "";
-  const net = vIn - vOut;
-  segs.push(`= ${net >= 0 ? "+" : ""}${net}`);
-  return "• " + segs.join("  ");
-}
+// ---- Agent Audit & Narrative ------------------------------------------------
 
 export type BuildOpts = {
-  // narrative header controls
-  anchorIso?: string; // "YYYY-MM-DD HH:MM:SS"
-  baselineText?: string; // lines per asset
-  anchorTransfer?: AnchorTransfer;
-
-  // hide-dust in finals
-  hideDustFinal?: boolean;
-
-  // if present, rows are already filtered by time window
   rows: Row[];
+  anchorIso?: string;
+  baselineText?: string;
+  anchorTransfer?: AnchorTransfer;
+  hideDustFinal?: boolean;
 };
 
 export function buildAgentAudit(opts: BuildOpts) {
   const baseline = parseBaselineText(opts.baselineText || "");
   const transfer = opts.anchorTransfer;
-
-  // All rows after anchor
   const rows = opts.rows ?? [];
 
-  // effect after anchor:
   const byAsset = netByAsset(rows);
 
-  // final = baseline (+ transfer) + effect
+  // Build finals = baseline + transfer + effect
   const finals: Record<string, number> = {};
-  // seed with baseline
-  for (const [asset, amt] of Object.entries(baseline)) finals[asset] = amt;
-
-  // apply transfer first (user said: “applied on the baseline first”)
+  for (const [a, v] of Object.entries(baseline)) finals[a] = v;
   if (transfer && !Number.isNaN(transfer.amount)) {
     const a = transfer.asset.toUpperCase();
     finals[a] = safeAdd(finals[a] ?? 0, transfer.amount);
   }
+  for (const [a, v] of Object.entries(byAsset)) finals[a] = safeAdd(finals[a] ?? 0, v);
 
-  // apply activity
-  for (const [asset, net] of Object.entries(byAsset)) {
-    finals[asset] = safeAdd(finals[asset] ?? 0, net);
-  }
-
-  // Build preview text
+  // Text
   const lines: string[] = [];
   lines.push("Agent Balance Audit");
   if (opts.anchorIso) lines.push(`Anchor (UTC+0): ${opts.anchorIso}`);
@@ -205,9 +171,7 @@ export function buildAgentAudit(opts: BuildOpts) {
 
   if (Object.keys(baseline).length) {
     lines.push("Baseline (before anchor):");
-    for (const [asset, amt] of Object.entries(baseline)) {
-      lines.push(`  • ${asset}  ${amt}`);
-    }
+    for (const [asset, amt] of Object.entries(baseline)) lines.push(`  • ${asset}  ${amt}`);
   } else {
     lines.push("Baseline: not provided (rolling forward from zero).");
   }
@@ -221,14 +185,12 @@ export function buildAgentAudit(opts: BuildOpts) {
 
   lines.push("");
   lines.push("Net effect (after anchor):");
-  for (const [asset, net] of Object.entries(byAsset)) {
-    lines.push(`  • ${asset}  ${net >= 0 ? "+" : ""}${net}`);
-  }
+  for (const [asset, net] of Object.entries(byAsset)) lines.push(`  • ${asset}  ${net >= 0 ? "+" : ""}${net}`);
 
   lines.push("");
   lines.push("Final expected balances:");
-  const finalEntries = Object.entries(finals).sort(([a], [b]) => a.localeCompare(b));
-  for (const [asset, val] of finalEntries) {
+  const sorted = Object.entries(finals).sort(([a], [b]) => a.localeCompare(b));
+  for (const [asset, val] of sorted) {
     if (opts.hideDustFinal && isDust(asset, val)) continue;
     lines.push(`  • ${asset}  ${val}`);
   }
@@ -236,39 +198,45 @@ export function buildAgentAudit(opts: BuildOpts) {
   return { text: lines.join("\n"), finals, effect: byAsset };
 }
 
+function fmtIO(asset: string, vIn: number, vOut: number) {
+  const parts: string[] = [];
+  if (!nearlyZero(vIn)) parts.push(`${asset} +${vIn}`);
+  if (!nearlyZero(vOut)) parts.push(`${asset} -${vOut}`);
+  if (!parts.length) return "";
+  const net = vIn - vOut;
+  parts.push(`= ${net >= 0 ? "+" : ""}${net}`);
+  return "• " + parts.join("  ");
+}
+
 export function buildNarrative(opts: BuildOpts) {
-  // Use same math as audit, plus per-type breakdown.
   const audit = buildAgentAudit(opts);
-
   const agg = aggregateByTypeAsset(opts.rows ?? []);
-
-  // section assembly
   const sections: Array<{ title: string; lines: string[] }> = [];
 
-  // REALIZED_PNL split profit/loss
+  // Realized: profit/loss ayrı
   if (agg.REALIZED_PNL) {
-    const items = agg.REALIZED_PNL;
-    const prof: string[] = [];
+    const bag = agg.REALIZED_PNL;
+    const profit: string[] = [];
     const loss: string[] = [];
-    for (const [asset, v] of Object.entries(items)) {
-      if (!nearlyZero(v.in)) prof.push(`• ${asset}  +${v.in}`);
+    for (const [asset, v] of Object.entries(bag)) {
+      if (!nearlyZero(v.in)) profit.push(`• ${asset}  +${v.in}`);
       if (!nearlyZero(v.out)) loss.push(`• ${asset}  -${v.out}`);
     }
     const lines: string[] = [];
-    if (prof.length) {
+    if (profit.length) {
       lines.push("Realized Profit:");
-      lines.push(...prof.map((s) => "  " + s));
+      lines.push(...profit.map((x) => "  " + x));
     }
     if (loss.length) {
-      if (prof.length) lines.push("");
+      if (profit.length) lines.push("");
       lines.push("Realized Loss:");
-      lines.push(...loss.map((s) => "  " + s));
+      lines.push(...loss.map((x) => "  " + x));
     }
     if (lines.length) sections.push({ title: "Realized Profit / Loss", lines });
   }
 
-  // General helper for simple sections
-  function pushSimpleSection(typeKey: string) {
+  // Basit bölümler
+  function pushSimple(typeKey: string) {
     const bag = agg[typeKey];
     if (!bag) return;
     const lines: string[] = [];
@@ -279,37 +247,34 @@ export function buildNarrative(opts: BuildOpts) {
     if (lines.length) sections.push({ title: SECTION_LABELS[typeKey] || typeKey, lines });
   }
 
-  // Dedicated sections in order (excluding Realized handled above)
   for (const key of ORDER) {
     if (key === "REALIZED_PNL") continue;
-    if (key === "COIN_SWAP_DEPOSIT" || key === "COIN_SWAP_WITHDRAW") continue; // handled later
-    pushSimpleSection(key);
+    if (key === "COIN_SWAP_DEPOSIT" || key === "COIN_SWAP_WITHDRAW") continue; // birleşik aşağıda
+    pushSimple(key);
   }
 
-  // Coin Swaps combined note
+  // Coin swaps birleşik anlatım
   const dep = agg.COIN_SWAP_DEPOSIT || {};
   const wdr = agg.COIN_SWAP_WITHDRAW || {};
-  const csLines: string[] = [];
-  const assetSet = new Set<string>([
-    ...Object.keys(dep),
-    ...Object.keys(wdr),
-  ]);
-  for (const a of Array.from(assetSet).sort()) {
-    const di = dep[a]?.in ?? dep[a]?.net ?? 0; // deposits counted on "in"
-    const wo = wdr[a]?.out ?? (wdr[a] ? Math.abs(wdr[a].net) : 0);
+  const swapLines: string[] = [];
+  const aset = new Set<string>([...Object.keys(dep), ...Object.keys(wdr)]);
+  for (const a of Array.from(aset).sort()) {
+    const di = dep[a]?.in ?? 0;
+    const wo = wdr[a]?.out ?? 0;
     if (nearlyZero(di) && nearlyZero(wo)) continue;
-    csLines.push(
-      `• ${a} swapped ${!nearlyZero(wo) ? "-" + wo : ""} ${!nearlyZero(di) ? "→ +" + di : ""}`.trim()
-    );
+    // “X swapped -wo → +di”
+    const minus = !nearlyZero(wo) ? `-${wo}` : "";
+    const plus = !nearlyZero(di) ? `+${di}` : "";
+    swapLines.push(`• ${a} swapped ${minus}${minus && plus ? " " : ""}${plus ? "→ " + plus : ""}`.trim());
   }
-  if (csLines.length) sections.push({ title: "Coin Swaps", lines: csLines });
+  if (swapLines.length) sections.push({ title: "Coin Swaps", lines: swapLines });
 
-  // Unknown types -> Other Transactions
+  // Diğer TYPE'lar
   const known = new Set(Object.keys(SECTION_LABELS));
   const others: string[] = [];
   for (const [typeKey, assets] of Object.entries(agg)) {
     if (typeKey === "REALIZED_PNL") continue;
-    if (typeKey.startsWith("EVENT_CONTRACTS_")) continue; // already covered
+    if (typeKey.startsWith("EVENT_CONTRACTS_")) continue;
     if (typeKey.startsWith("COIN_SWAP_")) continue;
     if (known.has(typeKey)) continue;
     for (const [asset, v] of Object.entries(assets)) {
@@ -319,28 +284,20 @@ export function buildNarrative(opts: BuildOpts) {
   }
   if (others.length) sections.push({ title: "Other Transactions", lines: others });
 
-  // Header
+  // Giriş metni
   const head: string[] = [];
   head.push("All dates/times below are UTC+0. Please adjust to your timezone.");
+  const base = parseBaselineText(opts.baselineText || "");
+
   if (opts.anchorIso && opts.anchorTransfer) {
-    // full intro
-    const before = (() => {
-      const a = opts.anchorTransfer!.asset.toUpperCase();
-      const base = parseBaselineText(opts.baselineText || "");
-      const valBefore = base[a] ?? 0;
-      return `${a} ${valBefore}`;
-    })();
-    const after = (() => {
-      const a = opts.anchorTransfer!.asset.toUpperCase();
-      const base = parseBaselineText(opts.baselineText || "");
-      const valAfter = safeAdd(base[a] ?? 0, opts.anchorTransfer!.amount);
-      return `${a} ${valAfter}`;
-    })();
+    const a = opts.anchorTransfer.asset.toUpperCase();
+    const before = base[a] ?? 0;
+    const after = safeAdd(before, opts.anchorTransfer.amount);
     head.push(
-      `${opts.anchorIso} — At this date/time, you transferred ${opts.anchorTransfer.amount} ${opts.anchorTransfer.asset.toUpperCase()} into your Futures USDs-M wallet. After this transfer your wallet balance changed from ${before} to ${after}.`
+      `${opts.anchorIso} — At this date/time, you transferred ${opts.anchorTransfer.amount} ${a} to your Futures USDs-M wallet. After this transfer your wallet balance changed from ${a} ${before} to ${a} ${after}.`
     );
     head.push("");
-    head.push("If we check your transaction records after this point:");
+    head.push("If we check your transaction records after this transfer:");
   } else if (opts.anchorIso && !opts.anchorTransfer) {
     head.push(`${opts.anchorIso} — At this date/time your Futures USDs-M wallet baseline is applied.`);
     head.push("");
@@ -349,7 +306,7 @@ export function buildNarrative(opts: BuildOpts) {
     head.push("Here are your transaction records:");
   }
 
-  // Body
+  // Bölümler
   const body: string[] = [];
   for (const s of sections) {
     body.push("");
@@ -357,7 +314,7 @@ export function buildNarrative(opts: BuildOpts) {
     body.push(...s.lines.map((x) => "  " + x));
   }
 
-  // Overall effect and finals (use same math as audit)
+  // Overall + Final
   const overall: string[] = [];
   overall.push("");
   overall.push("Overall effect (this range):");
@@ -368,10 +325,29 @@ export function buildNarrative(opts: BuildOpts) {
   const finals: string[] = [];
   finals.push("");
   finals.push("Final expected balances:");
-  for (const [asset, val] of Object.entries(audit.finals).sort(([a],[b]) => a.localeCompare(b))) {
+  for (const [asset, val] of Object.entries(audit.finals).sort(([a], [b]) => a.localeCompare(b))) {
     if (opts.hideDustFinal && isDust(asset, val)) continue;
     finals.push(`  • ${asset}  ${val}`);
   }
 
   return [head.join("\n"), body.join("\n"), overall.join("\n"), finals.join("\n")].join("\n");
+}
+
+// ---- Summary table data -----------------------------------------------------
+
+export type SummaryRow = { type: string; asset: string; in: number; out: number; net: number };
+
+export function buildSummaryRows(rows: Row[]): SummaryRow[] {
+  const agg = aggregateByTypeAsset(rows);
+  const out: SummaryRow[] = [];
+  const keys = Object.keys(agg).sort((a, b) => a.localeCompare(b));
+  for (const t of keys) {
+    for (const [asset, v] of Object.entries(agg[t])) {
+      if (nearlyZero(v.in) && nearlyZero(v.out) && nearlyZero(v.net)) continue;
+      out.push({ type: t, asset, in: v.in, out: v.out, net: v.net });
+    }
+  }
+  // sort: by type, then asset
+  out.sort((a, b) => (a.type === b.type ? a.asset.localeCompare(b.asset) : a.type.localeCompare(b.type)));
+  return out;
 }
