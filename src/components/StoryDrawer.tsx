@@ -1,6 +1,7 @@
 // src/components/StoryDrawer.tsx
 import React, { useMemo, useState } from "react";
-import { buildNarrative, buildAudit, totalsByType } from "@/lib/story";
+import { buildNarrativeParagraphs, buildAudit, totalsByType, buildSummaryRows } from "@/lib/story";
+import type { SummaryRow } from "@/lib/story";
 
 export type Row = {
   id: string; uid: string; asset: string; type: string; amount: number;
@@ -22,9 +23,10 @@ export default function StoryDrawer({
 }) {
   const [tab, setTab] = useState<"narrative" | "audit" | "raw">("narrative");
 
-  // -------- Shared (Audit inputs; Narrative isteğe bağlı bunları kullanır) --------
+  // ---- Shared inputs (Audit & Narrative use these) ----
   const [anchor, setAnchor] = useState<string>("");
   const [end, setEnd] = useState<string>("");
+
   const [baselineText, setBaselineText] = useState<string>("");
   const [trAmount, setTrAmount] = useState<string>("");
   const [trAsset, setTrAsset] = useState<string>("");
@@ -35,13 +37,11 @@ export default function StoryDrawer({
     const [, Y, Mo, D, H, Mi, S] = m;
     return Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S);
   }
-
   function parseBaseline(s: string): { map?: Record<string, number>; error?: string; preview?: string[] } {
     const out: Record<string, number> = {};
-    const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const lines = s.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     if (!lines.length) return { map: undefined };
     const preview: string[] = [];
-
     for (const line of lines) {
       let m = line.match(/^([A-Z0-9_]+)\s+(-?\d+(?:\.\d+)?)(?:\s*)$/i);
       if (m) {
@@ -58,7 +58,6 @@ export default function StoryDrawer({
     if (!Object.keys(out).length) return { map: undefined };
     return { map: out, preview };
   }
-
   function parseTransfer(amountStr: string, assetStr: string) {
     const amount = Number((amountStr || "").trim());
     const asset = (assetStr || "").trim().toUpperCase();
@@ -69,23 +68,21 @@ export default function StoryDrawer({
   const baselineParsed = useMemo(() => parseBaseline(baselineText), [baselineText]);
   const transferParsed = useMemo(() => parseTransfer(trAmount, trAsset), [trAmount, trAsset]);
 
-  // -------- Narrative options --------
-  const [showTimeline, setShowTimeline] = useState(false);
-  const [timelinePerType, setTimelinePerType] = useState(8);
-  const [useBaselineInNarrative, setUseBaselineInNarrative] = useState(true);
+  // ---- Narrative (English, paragraphs) ----
+  const anchorISO = useMemo(() => {
+    const ts = anchor ? parseUTC(anchor) : undefined;
+    if (!ts) return undefined;
+    return new Date(ts).toISOString().replace("T"," ").replace("Z","");
+  }, [anchor]);
 
-  const narrative = useMemo(
-    () =>
-      buildNarrative(rows, t0, t1, {
-        includeTimeline: showTimeline,
-        maxTimelinePerType: timelinePerType,
-        initialBalances: useBaselineInNarrative ? baselineParsed.map : undefined,
-        anchorTransfer: useBaselineInNarrative ? transferParsed : undefined,
-      }),
-    [rows, t0, t1, showTimeline, timelinePerType, useBaselineInNarrative, baselineParsed.map, transferParsed]
-  );
+  const narrativeText = useMemo(() =>
+    buildNarrativeParagraphs(rows, anchorISO, { initialBalances: baselineParsed.map, anchorTransfer: transferParsed }),
+  [rows, anchorISO, baselineParsed.map, transferParsed]);
 
-  // -------- Audit preview --------
+  // Summary rows for colored table
+  const summaryRows: SummaryRow[] = useMemo(() => buildSummaryRows(rows), [rows]);
+
+  // ---- Audit (technical) ----
   const auditText = useMemo(() => {
     const anchorTs = anchor ? parseUTC(anchor) : undefined;
     if (!anchorTs) return "Set an Anchor time (UTC+0) to run the audit.";
@@ -97,7 +94,7 @@ export default function StoryDrawer({
     }
   }, [anchor, end, rows, baselineParsed.map, transferParsed]);
 
-  // -------- Raw (diagnostic) --------
+  // ---- Raw (diagnostics) ----
   const rawPreview = useMemo(() => {
     const t = totalsByType(rows);
     const lines: string[] = [];
@@ -118,19 +115,36 @@ export default function StoryDrawer({
     catch { alert("Copy failed. Your browser may block clipboard access."); }
   }
 
+  // PNG Export only for the summary table
+  async function exportSummaryPng() {
+    try {
+      const el = document.getElementById("story-summary-table");
+      if (!el) throw new Error("Summary table not found");
+      const { default: html2canvas } = await import("html2canvas");
+      const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2 });
+      const url = canvas.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "balance-story-summary.png";
+      a.click();
+    } catch (err: any) {
+      alert("Export failed: " + (err?.message || String(err)));
+    }
+  }
+
   if (!open) return null;
 
   return (
     <div aria-modal role="dialog" onClick={onClose}
       style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,0.25)", display: "flex", justifyContent: "flex-end" }}>
       <div onClick={(e) => e.stopPropagation()} className="card"
-        style={{ width: "min(820px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
+        style={{ width: "min(920px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
 
         {/* Header */}
         <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center" }}>
           <h3 className="section-title">Balance Story (UTC+0)</h3>
           <div className="btn-row" style={{ gap: 8 }}>
-            {tab === "narrative" && <button className="btn" onClick={() => copy(narrative)}>Copy Narrative</button>}
+            {tab === "narrative" && <button className="btn" onClick={() => copy(narrativeText)}>Copy Story</button>}
             {tab === "audit" &&     <button className="btn" onClick={() => copy(auditText)}>Copy Audit</button>}
             {tab === "raw" &&       <button className="btn" onClick={() => copy(rawPreview)}>Copy Raw</button>}
             <button className="btn" onClick={onClose}>Close</button>
@@ -146,33 +160,75 @@ export default function StoryDrawer({
           </div>
         </div>
 
-        {/* Narrative */}
+        {/* Narrative (paragraphs) */}
         {tab === "narrative" && (
           <div className="card" style={{ marginTop: 8 }}>
-            <h4 className="section-title" style={{ marginBottom: 8 }}>Narrative</h4>
-
-            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-              <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input type="checkbox" checked={showTimeline} onChange={(e)=>setShowTimeline(e.target.checked)} />
-                Show timeline
+            {/* Inputs row */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 10 }}>
+              <label className="muted">Anchor time (UTC+0)
+                <input className="btn" style={{ width: "100%", textAlign: "left", marginTop: 6 }}
+                  value={anchor} onChange={(e)=>setAnchor(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </label>
-              {showTimeline && (
-                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  Max items/type
-                  <input className="btn" style={{ width: 100, textAlign: "left" }}
-                         value={timelinePerType}
-                         onChange={(e)=>setTimelinePerType(Math.max(1, Math.min(50, Number(e.target.value)||8)))} />
-                </label>
-              )}
-              <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input type="checkbox" checked={useBaselineInNarrative} onChange={(e)=>setUseBaselineInNarrative(e.target.checked)} />
-                Include baseline & transfer
+              <label className="muted">Baseline balances (optional)
+                <textarea className="btn"
+                  style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 64, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
+                  placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
+                  value={baselineText} onChange={(e)=>setBaselineText(e.target.value)} />
               </label>
+              <div>
+                <div className="muted">Anchor transfer (optional)</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
+                  <input className="btn" placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
+                  <input className="btn" placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
+                </div>
+              </div>
             </div>
 
-            <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: "20px", background: "#f7f7f9", padding: 12, borderRadius: 8, maxHeight: 560, overflow: "auto" }}>
-              {narrative}
-            </pre>
+            {/* Story text */}
+            <div className="card" style={{ marginTop: 10 }}>
+              <h4 className="section-title" style={{ marginBottom: 8 }}>Narrative</h4>
+              <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: "20px", background: "#f7f7f9", padding: 12, borderRadius: 8 }}>
+                {narrativeText}
+              </pre>
+            </div>
+
+            {/* Summary table + Export PNG */}
+            <div className="card" style={{ marginTop: 10 }}>
+              <div className="section-head" style={{ alignItems: "center" }}>
+                <h4 className="section-title">Summary (by Type & Asset)</h4>
+                <div className="btn-row">
+                  <button className="btn" onClick={exportSummaryPng}>Export Summary PNG</button>
+                </div>
+              </div>
+
+              <div id="story-summary-table" style={{ overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "100%", minWidth: 720 }}>
+                  <thead style={{ background: "#f3f4f6" }}>
+                    <tr>
+                      <th style={thStyleLeft}>Type</th>
+                      <th style={thStyle}>Asset</th>
+                      <th style={thStyle}>In</th>
+                      <th style={thStyle}>Out</th>
+                      <th style={thStyleRight}>Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summaryRows.length === 0 && (
+                      <tr><td colSpan={5} style={{ padding: "12px 14px", textAlign: "center", color: "#6b7280" }}>No data</td></tr>
+                    )}
+                    {summaryRows.map((r, i) => (
+                      <tr key={i} style={{ background: i % 2 ? "#fff" : "#fbfbfd" }}>
+                        <td style={tdStyleLeft}>{r.label}</td>
+                        <td style={tdStyleMono}>{r.asset}</td>
+                        <td style={{ ...tdStyleMono, color: r.in !== 0 ? "#047857" : "#6b7280" }}>{r.in !== 0 ? `+${r.in}` : "—"}</td>
+                        <td style={{ ...tdStyleMono, color: r.out !== 0 ? "#b91c1c" : "#6b7280" }}>{r.out !== 0 ? `-${r.out}` : "—"}</td>
+                        <td style={{ ...tdStyleMonoBold, color: r.net === 0 ? "#6b7280" : (r.net > 0 ? "#047857" : "#b91c1c") }}>{r.net}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
@@ -196,27 +252,14 @@ export default function StoryDrawer({
               <label className="muted">Baseline balances (optional)
                 <textarea className="btn"
                   style={{ width: "100%", textAlign: "left", marginTop: 6, minHeight: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 12 }}
-                  placeholder={`One per line (both orders allowed):\nUSDT 3450.12345678\n0.015 BTC`}
+                  placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
                   value={baselineText} onChange={(e)=>setBaselineText(e.target.value)} />
-                <div className="small muted" style={{ marginTop: 6 }}>
-                  {baselineParsed?.error
-                    ? <span style={{ color: "#b91c1c" }}>{baselineParsed.error}</span>
-                    : baselineParsed?.map
-                      ? <>Parsed baseline: {baselineParsed.preview?.join(", ")}</>
-                      : <>Tip: e.g. <b>USDT 3450.12</b> or <b>3450.12 USDT</b></>}
-                </div>
               </label>
-
               <div>
                 <div className="muted">Anchor transfer (optional)</div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
                   <input className="btn" placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
                   <input className="btn" placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
-                </div>
-                <div className="muted small" style={{ marginTop: 6 }}>
-                  {transferParsed
-                    ? <>Parsed transfer: {transferParsed.amount >= 0 ? "+" : "−"}{Math.abs(transferParsed.amount)} {transferParsed.asset}</>
-                    : <>Fill both fields to apply a transfer at the anchor moment.</>}
                 </div>
               </div>
             </div>
@@ -234,4 +277,27 @@ export default function StoryDrawer({
         {/* Raw */}
         {tab === "raw" && (
           <div className="card" style={{ marginTop: 8 }}>
-            <h4 className="section-title" style={{
+            <h4 className="section-title" style={{ marginBottom: 8 }}>Raw</h4>
+            <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: "18px", background: "#f7f7f9", padding: 12, borderRadius: 8, maxHeight: 560, overflow: "auto" }}>
+              {rawPreview}
+            </pre>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+// ------- tiny styles for table cells -------
+const cellBase: React.CSSProperties = { padding: "10px 12px", borderTop: "1px solid #e5e7eb", verticalAlign: "top", fontSize: 13 };
+const thBase: React.CSSProperties = { ...cellBase, fontWeight: 600, color: "#111827", borderTop: "none", textAlign: "left" };
+const tdBase: React.CSSProperties = { ...cellBase, color: "#111827" };
+
+const thStyleLeft: React.CSSProperties = { ...thBase, borderTopLeftRadius: 8 };
+const thStyle: React.CSSProperties = { ...thBase };
+const thStyleRight: React.CSSProperties = { ...thBase, borderTopRightRadius: 8 };
+
+const tdStyleLeft: React.CSSProperties = { ...tdBase, fontWeight: 500 };
+const tdStyleMono: React.CSSProperties = { ...tdBase, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" };
+const tdStyleMonoBold: React.CSSProperties = { ...tdStyleMono, fontWeight: 700 };
