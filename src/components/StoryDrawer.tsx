@@ -111,8 +111,8 @@ export default function StoryDrawer({
   }, [rows]);
 
   async function copy(text: string) {
-    try { await navigator.clipboard.writeText(text); alert("Copied to clipboard."); }
-    catch { alert("Copy failed. Your browser may block clipboard access."); }
+    try { await navigator.clipboard.writeText(text); }
+    catch { /* noop */ }
   }
 
   // PNG Export only for the summary table
@@ -136,6 +136,14 @@ export default function StoryDrawer({
   const dailySeries = useMemo(() => buildDailyNet(rows), [rows]);
   const assetNets = useMemo(() => buildAssetNet(rows), [rows]);
 
+  // close on Esc
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   return (
@@ -144,12 +152,11 @@ export default function StoryDrawer({
       <div onClick={(e) => e.stopPropagation()} className="card"
         style={{ width: "min(980px, 100%)", height: "100%", margin: 0, borderRadius: 0, overflow: "auto", background: "#fff", boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
 
-        {/* Header */}
-        <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-          <h3 className="section-title">Balance Story (UTC+0)</h3>
-          <div className="btn-row" style={{ gap: 8, flexWrap: "wrap" }}>
-            <select className="btn" value={lang} onChange={(e)=>setLang(e.target.value as any)} title="Language"
-              style={{ paddingRight: 28 }}>
+        {/* Header (wraps; buton kesilmiyor) */}
+        <div className="section-head" style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1, alignItems: "center", gap: 8, paddingTop: 10 }}>
+          <h3 className="section-title" style={{ marginRight: "auto" }}>Balance Story (UTC+0)</h3>
+          <div className="btn-row" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <select className="btn" value={lang} onChange={(e)=>setLang(e.target.value as any)} title="Language" style={{ paddingRight: 28, maxWidth: 170 }}>
               <option value="en">English</option>
               <option value="tr">Türkçe</option>
               <option value="ar">العربية</option>
@@ -176,7 +183,7 @@ export default function StoryDrawer({
         {/* Narrative */}
         {tab === "narrative" && (
           <div className="card" style={{ marginTop: 8 }}>
-            {/* Inputs row (responsive, prevents right-side clipping) */}
+            {/* Inputs row (responsive) */}
             <div
               style={{
                 display: "grid",
@@ -212,7 +219,7 @@ export default function StoryDrawer({
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)",
+                    gridTemplateColumns: "minmax(160px,1fr) minmax(120px,1fr)",
                     gap: 8,
                     marginTop: 6,
                   }}
@@ -257,7 +264,7 @@ export default function StoryDrawer({
                     )}
                     {summaryRows.map((r, i) => (
                       <tr key={i} style={{ background: i % 2 ? "#fff" : "#fbfbfd" }}>
-                        <td style={tdStyleLeft}>{r.label}</td>
+                        <td style={tdStyleLeft}>{r.label ?? r.type}</td>
                         <td style={tdStyleMono}>
                           <span style={{ marginRight: 6 }}>{assetIcon(r.asset)}</span>
                           {r.asset}
@@ -299,7 +306,7 @@ export default function StoryDrawer({
               </label>
               <div style={{ minWidth: 0 }}>
                 <div className="muted">Anchor transfer (optional)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)", gap: 8, marginTop: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(160px,1fr) minmax(120px,1fr)", gap: 8, marginTop: 6 }}>
                   <input className="btn" style={inputStyle} placeholder="Amount (e.g. 2000 or -0.015)" value={trAmount} onChange={(e)=>setTrAmount(e.target.value)} />
                   <input className="btn" style={inputStyle} placeholder="Asset (e.g. USDT)" value={trAsset} onChange={(e)=>setTrAsset(e.target.value)} />
                 </div>
@@ -363,7 +370,7 @@ const tdStyleLeft: React.CSSProperties = { ...tdBase, fontWeight: 500 };
 const tdStyleMono: React.CSSProperties = { ...tdBase, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" };
 const tdStyleMonoBold: React.CSSProperties = { ...tdStyleMono, fontWeight: 700 };
 
-// Shared input style to prevent clipping and force responsiveness
+// Shared input style (kesilmeyi engeller, responsive)
 const inputStyle: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
@@ -450,7 +457,7 @@ function ChartLine({ data, height = 240 }: { data: LinePoint[]; height?: number 
         ))}
         {[minY, (minY+maxY)/2, maxY].map((val, i) => (
           <g key={"y"+i}>
-            <text x={8} y={yScale(val)+4} fontSize="11" fill="#6b7280">{val.toFixed(6).replace(/\.?0+$/,"")}</text>
+            <text x={8} y={yScale(val)+4} fontSize="11" fill="#6b7280">{String(val)}</text>
             <line x1={pad.l-4} y1={yScale(val)} x2={pad.l} y2={yScale(val)} stroke="#9ca3af" />
           </g>
         ))}
@@ -498,7 +505,7 @@ function ChartBars({ data, height = 280 }: { data: { asset: string; net: number 
         })}
         {[maxAbs, 0, -maxAbs].map((v, idx) => (
           <text key={idx} x={8} y={pad.t + innerH/2 - (v/maxAbs)*(innerH/2) + 4} fontSize="11" fill="#6b7280">
-            {v.toFixed(6).replace(/\.?0+$/,"")}
+            {String(v)}
           </text>
         ))}
       </svg>
