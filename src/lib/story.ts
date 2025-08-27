@@ -1,10 +1,6 @@
 // src/lib/story.ts
-// Text generators for Balance Story: Narrative (GPT-style) and Agent Audit.
-// Requirements:
-// - Friendly but clear tone (not too casual).
-// - No rounding: show full precision (as parsed / summed).
-// - Hide zero-only lines (no +0, -0, = 0 noise).
-// - Mention ALL types that exist in the given rows.
+// Utilities to generate human-friendly Balance Stories.
+// Tone: friendly but clear. No rounding; print numbers as-is.
 
 export type Row = {
   id: string;
@@ -12,24 +8,60 @@ export type Row = {
   asset: string;
   type: string;
   amount: number;
-  time: string;
-  ts: number;         // UTC ms
+  time: string;     // "YYYY-MM-DD HH:MM:SS" (UTC+0 normalized)
+  ts: number;       // Date.UTC(...)
   symbol: string;
   extra: string;
   raw: string;
 };
 
 export type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
+export type TotalsByType = Record<string, TotalsMap>;
 
-function fmt(n: number) {
-  // No rounding; keep JS native precision printing
-  // Ensures "-0" is normalized to "0"
-  const s = Number.isFinite(n) ? String(n) : "0";
-  return s === "-0" ? "0" : s;
+const HUMAN: Record<string, string> = {
+  REALIZED_PNL: "Realized PnL",
+  COMMISSION: "Trading Fees",
+  FUNDING_FEE: "Funding",
+  INSURANCE_CLEAR: "Insurance Fund",
+  LIQUIDATION_FEE: "Liquidation Fee",
+  TRANSFER: "Transfer",
+  WELCOME_BONUS: "Welcome Bonus",
+  REFERRAL_KICKBACK: "Referral Kickback",
+  COMISSION_REBATE: "Commission Rebate",
+  CASH_COUPON: "Cash Coupon",
+  COIN_SWAP_DEPOSIT: "Coin Swap (Deposit)",
+  COIN_SWAP_WITHDRAW: "Coin Swap (Withdraw)",
+  POSITION_LIMIT_INCREASE_FEE: "Position Limit Increase Fee",
+  POSITION_CLAIM_TRANSFER: "Position Claim Transfer",
+  AUTO_EXCHANGE: "Auto-Exchange",
+  DELIVERED_SETTELMENT: "Delivered Settlement",
+  STRATEGY_UMFUTURES_TRANSFER: "Strategy Futures Transfer",
+  FUTURES_PRESENT: "Futures Present",
+  EVENT_CONTRACTS_ORDER: "Event Contracts (Order)",
+  EVENT_CONTRACTS_PAYOUT: "Event Contracts (Payout)",
+  INTERNAL_COMMISSION: "Internal Commission",
+  INTERNAL_TRANSFER: "Internal Transfer",
+  BFUSD_REWARD: "BFUSD Reward",
+  INTERNAL_AGENT_REWARD: "Internal Agent Reward",
+  API_REBATE: "API Rebate",
+  CONTEST_REWARD: "Contest Reward",
+  INTERNAL_CONTEST_REWARD: "Internal Contest Reward",
+  CROSS_COLLATERAL_TRANSFER: "Cross Collateral Transfer",
+  OPTIONS_PREMIUM_FEE: "Options Premium Fee",
+  OPTIONS_SETTLE_PROFIT: "Options Settle Profit",
+  LIEN_CLAIM: "Lien Claim",
+  INTERNAL_COMMISSION_REBATE: "Internal Commission Rebate",
+  FEE_RETURN: "Fee Return",
+  FUTURES_PRESENT_SPONSOR_REFUND: "Futures Present Sponsor Refund",
+};
+
+function labelOf(type: string) {
+  return HUMAN[type] || type.replace(/_/g, " ").replace(/\b([a-z])/g, (s) => s.toUpperCase());
 }
 
-function humanType(t: string) {
-  return t.replace(/_/g, " ").replace(/\b([a-z])/g, (m) => m.toUpperCase());
+function fmt(n: number) {
+  // No rounding by design; print raw number as string
+  return Number.isFinite(n) ? n.toString() : "0";
 }
 
 function sumByAsset(rows: Row[]): TotalsMap {
@@ -43,270 +75,207 @@ function sumByAsset(rows: Row[]): TotalsMap {
   return acc;
 }
 
-function pruneZeroTotals(m: TotalsMap) {
-  for (const k of Object.keys(m)) {
-    const v = m[k];
-    if (v.pos === 0 && v.neg === 0 && v.net === 0) {
-      delete (m as any)[k];
-    }
+function pruneZeros(map: TotalsMap): TotalsMap {
+  const out: TotalsMap = {};
+  for (const [asset, v] of Object.entries(map)) {
+    if (v.pos === 0 && v.neg === 0 && v.net === 0) continue;
+    out[asset] = v;
   }
+  return out;
 }
 
-function clampRange(rows: Row[], t0?: number, t1?: number) {
-  const lo = typeof t0 === "number" ? t0 : -Infinity;
-  const hi = typeof t1 === "number" ? t1 : Infinity;
-  return rows.filter((r) => r.ts >= lo && r.ts <= hi).sort((a, b) => a.ts - b.ts);
-}
-
-function timeRangeHeader(t0?: number, t1?: number) {
-  const f = (ts?: number) =>
-    typeof ts === "number" && Number.isFinite(ts)
-      ? new Date(ts).toISOString().replace("T", " ").replace(".000Z", "")
-      : "—";
-  return `Range (UTC+0): ${f(t0)} → ${f(t1)}`;
-}
-
-/** Join non-empty parts with separator */
-function joinParts(parts: string[], sep = "  •  ") {
-  return parts.filter(Boolean).join(sep);
-}
-
-/** Build simple line " +X ...  −Y ...  = Z " hiding +0/−0 */
-function partsLine(v: { pos: number; neg: number; net: number }) {
-  const parts: string[] = [];
-  if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
-  if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
-  // Always show net (even if 0) but upstream prunes all-zero rows.
-  parts.push(`= ${fmt(v.net)}`);
-  return parts.join("  ");
-}
-
-/** Group COIN_SWAP_* and AUTO_EXCHANGE into readable sentences per timestamp */
-function buildSwapLines(rows: Row[]) {
-  // key by exact timestamp string for grouping
-  const groups = new Map<string, Row[]>();
+export function groupByType(rows: Row[]): Record<string, Row[]> {
+  const m = new Map<string, Row[]>();
   for (const r of rows) {
-    const key = r.time; // already normalized "YYYY-MM-DD HH:mm:ss"
-    (groups.get(key) || groups.set(key, []).get(key)!)!.push(r);
+    const k = r.type || "(unknown)";
+    (m.get(k) || m.set(k, []).get(k)!)!.push(r);
   }
-  const out: string[] = [];
-  for (const [time, list] of groups.entries()) {
-    const byAsset = new Map<string, number>();
-    for (const g of list) byAsset.set(g.asset, (byAsset.get(g.asset) || 0) + g.amount);
-    const outs: string[] = [];
-    const ins: string[] = [];
-    for (const [asset, amt] of byAsset.entries()) {
-      if (amt < 0) outs.push(`−${fmt(Math.abs(amt))} ${asset}`);
-      if (amt > 0) ins.push(`+${fmt(amt)} ${asset}`);
-    }
-    if (!outs.length && !ins.length) continue;
-    const parts: string[] = [];
-    if (outs.length) parts.push(`Out: ${outs.join(", ")}`);
-    if (ins.length) parts.push(`In: ${ins.join(", ")}`);
-    out.push(`  ${time} — ${parts.join("  →  ")}`);
-  }
-  return out.sort();
+  const out: Record<string, Row[]> = {};
+  for (const [k, v] of m.entries()) out[k] = v;
+  return out;
 }
 
-/* ===================== NARRATIVE ===================== */
-
-export function buildNarrative(allRows: Row[], opts?: { t0?: string; t1?: string }) {
-  const t0 = opts?.t0 ? Date.parse(opts.t0 + "Z") : undefined;
-  const t1 = opts?.t1 ? Date.parse(opts.t1 + "Z") : undefined;
-  const rows = clampRange(allRows, t0, t1);
-
-  if (!rows.length) {
-    return [
-      "Balance Story",
-      timeRangeHeader(t0, t1),
-      "",
-      "No activity found in the selected range.",
-    ].join("\n");
+export function totalsByType(rows: Row[]): TotalsByType {
+  const byType = groupByType(rows);
+  const out: TotalsByType = {};
+  for (const [t, list] of Object.entries(byType)) {
+    out[t] = pruneZeros(sumByAsset(list));
   }
-
-  const header = ["Balance Story", timeRangeHeader(t0, t1), ""];
-  const byType = new Map<string, Row[]>();
-  for (const r of rows) {
-    const k = r.type || "(UNKNOWN)";
-    (byType.get(k) || byType.set(k, []).get(k)!)!.push(r);
-  }
-
-  const typeKeys = Array.from(byType.keys()).sort();
-
-  const body: string[] = [];
-  for (const typeKey of typeKeys) {
-    const list = byType.get(typeKey)!;
-
-    // For swaps/auto-exchange we render per-timestamp lines
-    const isSwapLike =
-      typeKey.includes("COIN_SWAP") || typeKey === "AUTO_EXCHANGE";
-
-    body.push(`• ${humanType(typeKey)}`);
-    if (isSwapLike) {
-      const lines = buildSwapLines(list);
-      if (lines.length) {
-        body.push(...lines);
-      } else {
-        // If nothing meaningful remains, don’t print empty section details
-      }
-    } else if (typeKey === "EVENT_CONTRACTS_ORDER" || typeKey === "EVENT_CONTRACTS_PAYOUT") {
-      const totals = sumByAsset(list);
-      pruneZeroTotals(totals);
-      const keys = Object.keys(totals).sort();
-      if (keys.length) {
-        for (const a of keys) {
-          body.push(`  ${a}  ${partsLine(totals[a])}`);
-        }
-      }
-    } else {
-      // General types: aggregate by asset, hide zero-only
-      const totals = sumByAsset(list);
-      pruneZeroTotals(totals);
-      const keys = Object.keys(totals).sort();
-      if (keys.length) {
-        for (const a of keys) {
-          body.push(`  ${a}  ${partsLine(totals[a])}`);
-        }
-      }
-    }
-
-    body.push(""); // section spacer
-  }
-
-  // Global net effect by asset across all rows in range
-  const grand = sumByAsset(rows);
-  pruneZeroTotals(grand);
-  const grandKeys = Object.keys(grand).sort();
-  if (grandKeys.length) {
-    body.push("Summary (net effect):");
-    for (const a of grandKeys) {
-      const v = grand[a];
-      // Only show net here to keep summary concise
-      body.push(`  ${a}  = ${fmt(v.net)}`);
-    }
-  }
-
-  return [...header, ...body].join("\n");
+  return out;
 }
 
-/* ===================== AGENT AUDIT ===================== */
+/** Narrative (GPT-style) story: friendly, clear, includes ALL types present; hides +0/−0 lines. */
+export function buildNarrative(rows: Row[], t0?: string, t1?: string): string {
+  if (!rows?.length) return "No activity in the selected range.";
 
-export type AuditInput = {
-  anchorTs: string;                     // "YYYY-MM-DD HH:mm:ss" in UTC+0
-  endTs?: string;                       // optional end
-  baseline?: Record<string, number>;    // optional baseline balances (pre-transfer)
-  anchorTransfer?: { asset: string; amount: number }; // optional transfer applied at anchor
-};
+  const sorted = [...rows].sort((a, b) => a.ts - b.ts);
+  const byType = groupByType(sorted);
 
-/**
- * Agent Audit:
- * - Start from anchor time (and optional baseline & transfer).
- * - Apply transfer to baseline (if provided).
- * - Accumulate all movements strictly AFTER anchor up to end.
- * - Produce per-asset final expected balances.
- */
-export function buildAudit(allRows: Row[], input: AuditInput) {
-  const tAnchor = Date.parse(input.anchorTs + "Z");
-  const tEnd = input.endTs ? Date.parse(input.endTs + "Z") : undefined;
-
-  const rowsAfter = clampRange(
-    allRows,
-    tAnchor + 1, // strictly after anchor moment
-    tEnd
-  );
-
-  // Baseline (pre-transfer)
-  const baseline: Record<string, number> = {};
-  if (input.baseline) {
-    for (const [a, n] of Object.entries(input.baseline)) {
-      baseline[a] = n;
-    }
-  }
-
-  // Apply anchor transfer (if provided) to get "post-transfer expected"
-  const post: Record<string, number> = { ...baseline };
-  if (input.anchorTransfer && input.anchorTransfer.asset) {
-    const a = input.anchorTransfer.asset;
-    post[a] = (post[a] || 0) + input.anchorTransfer.amount;
-  }
-
-  // Aggregate all rows AFTER anchor
-  const delta = sumByAsset(rowsAfter);
-
-  // Final expected = post + delta.net
-  const final: Record<string, number> = { ...post };
-  for (const [a, v] of Object.entries(delta)) {
-    final[a] = (final[a] || 0) + v.net;
-  }
-
-  // Build text
   const lines: string[] = [];
-  lines.push("Agent Balance Audit");
-  lines.push(`Anchor (UTC+0): ${input.anchorTs}`);
-  lines.push(`End (UTC+0): ${input.endTs ? input.endTs : "—"}`);
+  lines.push("Balance Story");
+  if (t0 || t1) lines.push(`Range (UTC+0): ${t0 || "—"} → ${t1 || "—"}`);
   lines.push("");
 
-  // Baseline
-  if (Object.keys(baseline).length) {
-    lines.push("Baseline (before anchor transfer):");
-    for (const a of Object.keys(baseline).sort()) {
-      lines.push(`  ${a}  ${fmt(baseline[a])}`);
+  // Walk every type that actually appears in the data
+  const typeKeys = Object.keys(byType).sort();
+  for (const typeKey of typeKeys) {
+    const label = labelOf(typeKey);
+    const list = byType[typeKey];
+
+    // Summaries per asset (no zero-only rows)
+    const totals = pruneZeros(sumByAsset(list));
+    const assets = Object.keys(totals).sort();
+
+    // If nothing meaningful, skip the section entirely
+    if (assets.length === 0) continue;
+
+    lines.push(`${label}:`);
+
+    // Timeline bullets (concise, keep all decimals)
+    for (const r of list) {
+      if (r.amount === 0) continue;
+      // Example: 12:30:15 — +0.00421 USDT  (BTCUSDT)
+      const hh = r.time.split(" ")[1] || r.time;
+      const sign = r.amount >= 0 ? "+" : "−";
+      lines.push(`  • ${hh} — ${sign}${fmt(Math.abs(r.amount))} ${r.asset}${r.symbol ? `  (${r.symbol})` : ""}`);
+    }
+
+    // Totals block
+    lines.push("  = Totals:");
+    for (const a of assets) {
+      const v = totals[a];
+      const parts: string[] = [];
+      if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
+      if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
+      parts.push(`= ${fmt(v.net)}`);
+      lines.push(`    • ${a}  ${parts.join("  ")}`);
     }
     lines.push("");
+  }
+
+  // Grand totals across all types (by asset)
+  const grandTotals = pruneZeros(sumByAsset(rows));
+  if (Object.keys(grandTotals).length) {
+    lines.push("Overall Effect:");
+    for (const [asset, v] of Object.entries(grandTotals).sort(([a], [b]) => a.localeCompare(b))) {
+      const parts: string[] = [];
+      if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
+      if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
+      parts.push(`= ${fmt(v.net)}`);
+      lines.push(`  • ${asset}  ${parts.join("  ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** Agent audit input shape */
+export type AuditInput = {
+  anchorTs: number;                    // required (UTC epoch ms)
+  endTs?: number;                      // optional: end boundary
+  baseline?: Record<string, number>;   // optional: balances BEFORE the anchor transfer
+  anchorTransfer?: { asset: string; amount: number }; // optional: apply this to baseline first
+};
+
+/** Agent-style audit: uses anchor time, optional baseline & transfer; then rolls forward. */
+export function buildAudit(rows: Row[], input: AuditInput): string {
+  const { anchorTs, endTs, baseline, anchorTransfer } = input;
+  const lines: string[] = [];
+
+  lines.push("Agent Balance Audit");
+
+  // Focused range
+  const from = anchorTs ?? -Infinity;
+  const to = endTs ?? Infinity;
+
+  // If baseline is provided, compute post-transfer baseline first
+  const before: Record<string, number> = { ...(baseline || {}) };
+  if (anchorTransfer && anchorTransfer.asset) {
+    before[anchorTransfer.asset] = (before[anchorTransfer.asset] || 0) + anchorTransfer.amount;
+  }
+
+  // After-anchor activity
+  const tail = rows
+    .filter((r) => r.ts >= from && r.ts <= to)
+    .sort((a, b) => a.ts - b.ts);
+
+  // Roll-up deltas by asset
+  const deltas = sumByAsset(tail);
+  const deltasPruned = pruneZeros(deltas);
+
+  // Final expected balances
+  const final: Record<string, number> = {};
+  const assets = new Set<string>([
+    ...Object.keys(before),
+    ...Object.keys(deltasPruned),
+  ]);
+  for (const a of assets) {
+    const base = before[a] || 0;
+    const d = deltasPruned[a] || { net: 0, pos: 0, neg: 0 };
+    final[a] = base + d.net;
+  }
+
+  // Header
+  lines.push(`Anchor (UTC+0): ${new Date(anchorTs).toISOString().replace("T", " ").replace("Z","")}`);
+  if (endTs) lines.push(`End (UTC+0):    ${new Date(endTs).toISOString().replace("T", " ").replace("Z","")}`);
+  lines.push("");
+
+  // Baseline & transfer explanation
+  if (baseline && Object.keys(baseline).length) {
+    lines.push("Baseline (before anchor):");
+    for (const [a, v] of Object.entries(baseline).sort(([x],[y]) => x.localeCompare(y))) {
+      lines.push(`  • ${a}  ${fmt(v)}`);
+    }
+    if (anchorTransfer) {
+      const s = anchorTransfer.amount >= 0 ? "+" : "−";
+      lines.push(`Applied anchor transfer: ${s}${fmt(Math.abs(anchorTransfer.amount))} ${anchorTransfer.asset}`);
+    }
   } else {
-    lines.push("Baseline: not provided (working relatively from anchor).");
-    lines.push("");
-  }
-
-  // Anchor transfer
-  if (input.anchorTransfer && input.anchorTransfer.asset) {
-    lines.push("Anchor transfer (applied at anchor):");
-    lines.push(
-      `  ${input.anchorTransfer.asset}  ${fmt(input.anchorTransfer.amount)}`
-    );
-    lines.push("");
-  }
-
-  // Post-transfer expected
-  if (Object.keys(post).length) {
-    lines.push("Expected after anchor (baseline + transfer):");
-    for (const a of Object.keys(post).sort()) {
-      lines.push(`  ${a}  ${fmt(post[a])}`);
+    lines.push("Baseline: not provided (rolling forward from zero).");
+    if (anchorTransfer) {
+      const s = anchorTransfer.amount >= 0 ? "+" : "−";
+      lines.push(`Note: applied anchor transfer on zero baseline → ${s}${fmt(Math.abs(anchorTransfer.amount))} ${anchorTransfer.asset}`);
     }
-    lines.push("");
   }
+  lines.push("");
 
-  // Movements after anchor (by type + asset) for full transparency
-  if (rowsAfter.length) {
+  // Activity after anchor (by type)
+  if (tail.length) {
     lines.push("Activity after anchor:");
-    const byType = new Map<string, Row[]>();
-    for (const r of rowsAfter) {
-      (byType.get(r.type) || byType.set(r.type, []).get(r.type)!)!.push(r);
-    }
-    for (const typeKey of Array.from(byType.keys()).sort()) {
-      const list = byType.get(typeKey)!;
-      lines.push(`• ${humanType(typeKey)}`);
-      if (typeKey.includes("COIN_SWAP") || typeKey === "AUTO_EXCHANGE") {
-        const swapLines = buildSwapLines(list);
-        if (swapLines.length) lines.push(...swapLines);
-      } else {
-        const totals = sumByAsset(list);
-        pruneZeroTotals(totals);
-        for (const a of Object.keys(totals).sort()) {
-          lines.push(`  ${a}  ${partsLine(totals[a])}`);
-        }
+    const byType = groupByType(tail);
+    for (const typeKey of Object.keys(byType).sort()) {
+      const label = labelOf(typeKey);
+      const list = byType[typeKey].filter(r => r.amount !== 0);
+      if (!list.length) continue;
+      lines.push(`  ${label}:`);
+      for (const r of list) {
+        const sign = r.amount >= 0 ? "+" : "−";
+        lines.push(`    • ${r.time.split(" ")[1]} — ${sign}${fmt(Math.abs(r.amount))} ${r.asset}${r.symbol ? `  (${r.symbol})` : ""}`);
       }
-      lines.push("");
     }
+    lines.push("");
   } else {
-    lines.push("No activity after anchor.");
+    lines.push("No activity found after anchor in the selected range.");
+    lines.push("");
+  }
+
+  // Deltas summary
+  if (Object.keys(deltasPruned).length) {
+    lines.push("Net effect (after anchor):");
+    for (const [a, v] of Object.entries(deltasPruned).sort(([x],[y]) => x.localeCompare(y))) {
+      const parts: string[] = [];
+      if (v.pos !== 0) parts.push(`+${fmt(v.pos)}`);
+      if (v.neg !== 0) parts.push(`−${fmt(v.neg)}`);
+      parts.push(`= ${fmt(v.net)}`);
+      lines.push(`  • ${a}  ${parts.join("  ")}`);
+    }
     lines.push("");
   }
 
   // Final expected balances
   lines.push("Final expected balances:");
-  for (const a of Object.keys(final).sort()) {
-    lines.push(`  ${a}  ${fmt(final[a])}`);
+  for (const a of [...assets].sort((x, y) => x.localeCompare(y))) {
+    lines.push(`  • ${a}  ${fmt(final[a])}`);
   }
 
   return lines.join("\n");
