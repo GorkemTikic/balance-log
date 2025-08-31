@@ -1,8 +1,10 @@
 // src/lib/story.ts
 /* Pure helpers: NO JSX here. Provides:
-   - buildNarrativeParagraphs(rows, anchorISO?, opts)
+   - buildNarrativeParagraphs(rows, anchorISO?, opts, finalAppend?)
    - buildAudit(rows, opts)
    - buildSummaryRows(rows)
+   - computeFinalBalances(rows, opts)
+   - formatFinalBalances(balances, lang)
 
    Types kept in sync with StoryDrawer.tsx
 */
@@ -313,7 +315,7 @@ export function buildSummaryRows(rows: Row[]): SummaryRow[] {
       const { pos, neg } = acc[t][a];
       if (almostZero(pos) && almostZero(neg)) continue;
       out.push({
-        label: tLabel("en", t), // UI renklendirme sabit, başlık İngilizce; StoryDrawer dil çevirisini metinde yapıyor
+        label: tLabel("en", t),
         type: t,
         asset: a,
         in: roundFull(pos),
@@ -339,7 +341,8 @@ type NarrativeOpts = {
 export function buildNarrativeParagraphs(
   rows: Row[],
   anchorISO?: string,
-  opts?: NarrativeOpts
+  opts?: NarrativeOpts,
+  finalAppend?: { rows: Row[]; audit: AuditOpts } // OPTIONAL: if provided, append final balances to narrative
 ): string {
   const lang = opts?.lang ?? "en";
   const parts: string[] = [];
@@ -363,7 +366,6 @@ export function buildNarrativeParagraphs(
     );
     parts.push(L.sectionAfter[lang]);
   } else if (anchorISO && numDefined(opts?.initialBalances?.USDT)) {
-    // Only anchor + a baseline sample (USDT preferred just to phrase)
     parts.push(
       L.introAnchorOnlyBalance[lang](anchorISO, opts!.initialBalances!.USDT, "USDT")
     );
@@ -372,7 +374,7 @@ export function buildNarrativeParagraphs(
     parts.push(L.introNoAnchor[lang]);
   }
 
-  // Summaries by type/asset (post-filter: after anchor if provided)
+  // Filter after anchor if provided
   const filtered = anchorISO
     ? rows.filter((r) => r.ts >= Date.parse(anchorISO + "Z"))
     : rows.slice();
@@ -409,7 +411,7 @@ export function buildNarrativeParagraphs(
     }
   }
 
-  // The rest of types (excluding ones we already wrote explicitly)
+  // The rest
   const skip = new Set(["AUTO_EXCHANGE", "COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW"]);
   const remainingTypes = Object.keys(acc).filter((t) => !skip.has(t));
   remainingTypes.sort();
@@ -420,7 +422,6 @@ export function buildNarrativeParagraphs(
     for (const a of Object.keys(items)) {
       const { pos, neg } = items[a];
       if (almostZero(pos) && almostZero(neg)) continue;
-      // For things like REALIZED_PNL negatives are losses — show with minus sign
       if (!almostZero(pos)) lines.push(`  • ${a}  +${fmtExact(pos)}`);
       if (!almostZero(neg)) lines.push(`  • ${a}  -${fmtExact(neg)}`);
     }
@@ -443,6 +444,15 @@ export function buildNarrativeParagraphs(
     parts.push("");
     parts.push(L.sectionTotals[lang]);
     parts.push(...totalLines);
+  }
+
+  // OPTIONAL: append final balances (computed audit)
+  if (finalAppend) {
+    const finalTxt = buildAudit(finalAppend.rows, finalAppend.audit, lang);
+    if (finalTxt.trim()) {
+      parts.push("");
+      parts.push(finalTxt);
+    }
   }
 
   return parts.join("\n");
@@ -475,7 +485,7 @@ function sumByAsset(rows: Row[]): Record<string, PM> {
   return m;
 }
 
-/* ---------------------------------- audit ---------------------------------- */
+/* --------------------------------- audit ----------------------------------- */
 
 type AuditOpts = {
   anchorTs: number;            // required
@@ -484,22 +494,19 @@ type AuditOpts = {
   anchorTransfer?: { amount: number; asset: string }; // optional
 };
 
-export function buildAudit(rows: Row[], opts: AuditOpts): string {
+export function computeFinalBalances(rows: Row[], opts: AuditOpts): Record<string, number> {
   const { anchorTs, endTs, baseline, anchorTransfer } = opts;
 
-  // Start base
   const bal: Record<string, number> = {};
   if (baseline) {
     for (const a of Object.keys(baseline)) bal[a] = baseline[a];
   }
 
-  // Apply anchor transfer
   if (anchorTransfer && anchorTransfer.asset) {
     const a = anchorTransfer.asset.toUpperCase();
     bal[a] = (bal[a] || 0) + anchorTransfer.amount;
   }
 
-  // Apply all rows >= anchorTs (and <= endTs if provided)
   for (const r of rows) {
     if (r.ts < anchorTs) continue;
     if (numDefined(endTs) && r.ts > endTs!) continue;
@@ -507,25 +514,34 @@ export function buildAudit(rows: Row[], opts: AuditOpts): string {
     bal[a] = (bal[a] || 0) + r.amount;
   }
 
-  // Normalize tiny ~0 values
+  // normalize -0 to 0 and keep tiny values (no dust hiding)
   for (const a of Object.keys(bal)) {
     if (almostZero(bal[a])) bal[a] = 0;
   }
+  return bal;
+}
 
-  // Hide tiny dust for BFUSD/FDUSD/LDUSDT if |val| < 1e-7
-  const HIDE_DUST = new Set(["BFUSD", "FDUSD", "LDUSDT"]);
-  const finalLines: string[] = [];
-  const assetsSorted = Object.keys(bal).sort();
-  for (const a of assetsSorted) {
+export function formatFinalBalances(bal: Record<string, number>, lang: Lang = "en"): string {
+  const keys = Object.keys(bal).sort();
+  const lines: string[] = [];
+  for (const a of keys) {
     const v = bal[a];
-    if (HIDE_DUST.has(a) && Math.abs(v) < 1e-7) continue;
-    if (almostZero(v)) continue; // also hide perfect zeros
-    finalLines.push(`  • ${a}  ${fmtExact(v)}`);
+    if (v === 0) continue; // still skip exact zeros
+    lines.push(`  • ${a}  ${fmtExact(v)}`);
   }
+  if (!lines.length) return lang === "tr" ? "Anlamlı bir bakiye değişimi yok." : "No material balance change.";
+  const title =
+    lang === "tr" ? "Nihai cüzdan bakiyesi (hesaplanan):" :
+    lang === "ar" ? "الرصيد النهائي للمحفظة (محسوب):" :
+    lang === "vi" ? "Số dư ví cuối cùng (tính toán):" :
+    lang === "ru" ? "Итоговый баланс кошелька (расчёт):" :
+    "Final wallet balance (computed):";
+  return [title, ...lines].join("\n");
+}
 
-  if (!finalLines.length) return "No material balance change.";
-
-  return ["Final expected balances:", ...finalLines].join("\n");
+export function buildAudit(rows: Row[], opts: AuditOpts, lang: Lang = "en"): string {
+  const bal = computeFinalBalances(rows, opts);
+  return formatFinalBalances(bal, lang);
 }
 
 /* --------------------------------- helpers --------------------------------- */
@@ -539,22 +555,17 @@ function almostZero(n: number, eps = 1e-12) {
 }
 
 function roundFull(n: number) {
-  // keep full precision as string, but return Number for table math
-  // narrative uses fmtExact which prints full value without trimming significant digits
   return Number(n);
 }
 
 function fmtExact(n: number) {
-  // No rounding, preserve decimals as-is in JS string (avoid scientific where possible)
   if (Object.is(n, -0)) return "0";
   const s = String(n);
-  // Expand scientific notation if needed
   if (/e-?\d+$/i.test(s)) {
-    // Fallback: toFixed with enough places
     const mag = Math.ceil(Math.abs(Math.log10(Math.abs(n) || 1)));
     const places = Math.min(30, mag + 18);
     return Number(n).toFixed(places).replace(/\.?0+$/, "");
-  }
+    }
   return s;
 }
 
@@ -564,5 +575,5 @@ function fmtSigned(n: number) {
 
 function fmtSignBlock(n: number) {
   if (almostZero(n)) return "";
-  return (n >= 0 ? ` +${fmtExact(n)}` : ` ${fmtExact(n)}`); // includes minus
+  return (n >= 0 ? ` +${fmtExact(n)}` : ` ${fmtExact(n)}`);
 }
