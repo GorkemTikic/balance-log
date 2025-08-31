@@ -8,6 +8,7 @@ import {
   type Lang,
 } from "@/lib/story";
 
+// Satırlarda beklenen temel tip
 export type Row = {
   id: string;
   uid: string;
@@ -30,9 +31,7 @@ export default function StoryDrawer({
   onClose: () => void;
   rows: Row[];
 }) {
-  const [tab, setTab] = useState<"narrative" | "audit" | "charts" | "raw">(
-    "narrative"
-  );
+  const [tab, setTab] = useState<"narrative" | "audit" | "charts" | "raw">("narrative");
 
   // Inputs
   const [anchor, setAnchor] = useState<string>("");
@@ -44,39 +43,39 @@ export default function StoryDrawer({
 
   // ---- parsing helpers
   function parseUTC(s: string): number | undefined {
-    const m = s
+    const m = (s || "")
       .trim()
       .match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
     if (!m) return undefined;
     const [, Y, Mo, D, H, Mi, S] = m;
     return Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S);
   }
+
   function parseBaseline(
     s: string
   ): { map?: Record<string, number>; error?: string } {
     const out: Record<string, number> = {};
-    const lines = s
+    const lines = (s || "")
       .split(/\r?\n/)
       .map((l) => l.trim())
       .filter(Boolean);
     if (!lines.length) return { map: undefined };
     for (const line of lines) {
-      let m = line.match(/^([A-Z0-9_]+)\s+(-?\d+(?:\.\d+)?)$/i);
+      let m = line.match(/^([A-Z0-9_]+)\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i);
       if (m) {
-        out[m[1].toUpperCase()] =
-          (out[m[1].toUpperCase()] || 0) + Number(m[2]);
+        out[m[1].toUpperCase()] = (out[m[1].toUpperCase()] || 0) + Number(m[2]);
         continue;
       }
-      m = line.match(/^(-?\d+(?:\.\d+)?)\s+([A-Z0-9_]+)$/i);
+      m = line.match(/^(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+([A-Z0-9_]+)$/i);
       if (m) {
-        out[m[2].toUpperCase()] =
-          (out[m[2].toUpperCase()] || 0) + Number(m[1]);
+        out[m[2].toUpperCase()] = (out[m[2].toUpperCase()] || 0) + Number(m[1]);
         continue;
       }
       return { error: `Could not parse: "${line}"` };
     }
     return { map: out };
   }
+
   function parseTransfer(amountStr: string, assetStr: string) {
     const amount = Number((amountStr || "").trim());
     const asset = (assetStr || "").trim().toUpperCase();
@@ -84,14 +83,8 @@ export default function StoryDrawer({
     return { asset, amount };
   }
 
-  const baselineParsed = useMemo(
-    () => parseBaseline(baselineText),
-    [baselineText]
-  );
-  const transferParsed = useMemo(
-    () => parseTransfer(trAmount, trAsset),
-    [trAmount, trAsset]
-  );
+  const baselineParsed = useMemo(() => parseBaseline(baselineText), [baselineText]);
+  const transferParsed = useMemo(() => parseTransfer(trAmount, trAsset), [trAmount, trAsset]);
 
   const anchorISO = useMemo(() => {
     const ts = anchor ? parseUTC(anchor) : undefined;
@@ -99,7 +92,7 @@ export default function StoryDrawer({
     return new Date(ts).toISOString().replace("T", " ").replace("Z", "");
   }, [anchor]);
 
-  // ---- Narrative text (built in story.ts)
+  // ---- Narrative (story.ts oluşturur)
   const narrativeText = useMemo(
     () =>
       buildNarrativeParagraphs(rows, anchorISO, {
@@ -110,17 +103,13 @@ export default function StoryDrawer({
     [rows, anchorISO, baselineParsed.map, transferParsed, lang]
   );
 
-  // ---- Summary rows for colored table (hide zeros handled in story.ts)
-  const summaryRows: SummaryRow[] = useMemo(
-    () => buildSummaryRows(rows),
-    [rows]
-  );
+  // ---- Summary (renkli tablo)
+  const summaryRows: SummaryRow[] = useMemo(() => buildSummaryRows(rows), [rows]);
 
-  // ---- Agent audit (final balance math; filters tiny dust handled in story.ts)
+  // ---- Agent Audit (nihai bakiyeler, dust filtreleme story.ts tarafında)
   const auditText = useMemo(() => {
     const anchorTs = anchor ? parseUTC(anchor) : undefined;
-    if (!anchorTs)
-      return "Set an Anchor time (UTC+0) to run the audit.";
+    if (!anchorTs) return "Set an Anchor time (UTC+0) to run the audit.";
     const endTs = end ? parseUTC(end) : undefined;
     try {
       return buildAudit(rows, {
@@ -143,26 +132,24 @@ export default function StoryDrawer({
       alert("Copy failed (clipboard is blocked).");
     }
   }
+
   async function exportSummaryPng() {
     try {
       const el = document.getElementById("story-summary-table");
       if (!el) throw new Error("Summary table not found");
       const { default: html2canvas } = await import("html2canvas");
-      const canvas = await html2canvas(el, {
-        backgroundColor: "#ffffff",
-        scale: 2,
-      });
+      const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2 });
       const url = canvas.toDataURL("image/png");
       const a = document.createElement("a");
       a.href = url;
-      a.download = "balance-story-summary.png";
+      a.download = "balance-summary.png";
       a.click();
     } catch (err: any) {
       alert("Export failed: " + (err?.message || String(err)));
     }
   }
 
-  // ---- Tiny SVG charts (kept lightweight)
+  // ---- Mini Charts (hafif SVG)
   const dailySeries = useMemo(() => buildDailyNet(rows), [rows]);
   const assetNets = useMemo(() => buildAssetNet(rows), [rows]);
 
@@ -176,8 +163,8 @@ export default function StoryDrawer({
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 50,
-        background: "rgba(0,0,0,0.25)",
+        zIndex: 60,
+        background: "rgba(17,24,39,0.45)",
         display: "flex",
         justifyContent: "flex-end",
       }}
@@ -193,9 +180,11 @@ export default function StoryDrawer({
           overflow: "auto",
           background: "#fff",
           boxShadow: "0 10px 30px rgba(0,0,0,.25)",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
-        {/* Sticky header with safe wrapping so buttons never overflow */}
+        {/* Sticky header */}
         <div
           className="section-head"
           style={{
@@ -204,18 +193,16 @@ export default function StoryDrawer({
             background: "#fff",
             zIndex: 1,
             alignItems: "center",
-            flexWrap: "wrap",
             gap: 8,
+            flexWrap: "wrap",
             paddingRight: 8,
+            borderBottom: "1px solid #eee",
           }}
         >
           <h3 className="section-title" style={{ marginRight: "auto" }}>
             Balance Story (UTC+0)
           </h3>
-          <div
-            className="btn-row"
-            style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}
-          >
+          <div className="btn-row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {tab === "narrative" && (
               <button className="btn" onClick={() => copy(narrativeText)}>
                 Copy Story
@@ -252,46 +239,19 @@ export default function StoryDrawer({
         {/* Tabs */}
         <div className="card" style={{ marginTop: 8 }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              className="btn"
-              onClick={() => setTab("narrative")}
-              style={{
-                background: tab === "narrative" ? "#111827" : "#fff",
-                color: tab === "narrative" ? "#fff" : undefined,
-              }}
-            >
-              Narrative
-            </button>
-            <button
-              className="btn"
-              onClick={() => setTab("audit")}
-              style={{
-                background: tab === "audit" ? "#111827" : "#fff",
-                color: tab === "audit" ? "#fff" : undefined,
-              }}
-            >
-              Agent Audit
-            </button>
-            <button
-              className="btn"
-              onClick={() => setTab("charts")}
-              style={{
-                background: tab === "charts" ? "#111827" : "#fff",
-                color: tab === "charts" ? "#fff" : undefined,
-              }}
-            >
-              Charts
-            </button>
-            <button
-              className="btn"
-              onClick={() => setTab("raw")}
-              style={{
-                background: tab === "raw" ? "#111827" : "#fff",
-                color: tab === "raw" ? "#fff" : undefined,
-              }}
-            >
-              Raw
-            </button>
+            {(["narrative", "audit", "charts", "raw"] as const).map((t) => (
+              <button
+                key={t}
+                className="btn"
+                onClick={() => setTab(t)}
+                style={{
+                  background: tab === t ? "#111827" : "#fff",
+                  color: tab === t ? "#fff" : undefined,
+                }}
+              >
+                {t === "narrative" ? "Narrative" : t === "audit" ? "Agent Audit" : t === "charts" ? "Charts" : "Raw"}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -317,6 +277,7 @@ export default function StoryDrawer({
                   placeholder="YYYY-MM-DD HH:MM:SS"
                 />
               </label>
+
               <label className="muted" style={{ minWidth: 0 }}>
                 Baseline balances (optional)
                 <textarea
@@ -324,8 +285,7 @@ export default function StoryDrawer({
                   style={{
                     ...inputStyle,
                     minHeight: 64,
-                    fontFamily:
-                      "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                     fontSize: 12,
                   }}
                   placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
@@ -333,13 +293,13 @@ export default function StoryDrawer({
                   onChange={(e) => setBaselineText(e.target.value)}
                 />
               </label>
+
               <div style={{ minWidth: 0 }}>
                 <div className="muted">Anchor transfer (optional)</div>
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns:
-                      "minmax(140px,1fr) minmax(110px,1fr)",
+                    gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)",
                     gap: 8,
                     marginTop: 6,
                   }}
@@ -382,12 +342,9 @@ export default function StoryDrawer({
               </pre>
             </div>
 
-            {/* Summary table with colored numbers & PNG export */}
+            {/* Summary table */}
             <div className="card" style={{ marginTop: 10 }}>
-              <div
-                className="section-head"
-                style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}
-              >
+              <div className="section-head" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                 <h4 className="section-title">Summary (by Type & Asset)</h4>
                 <div className="btn-row">
                   <button className="btn" onClick={exportSummaryPng}>
@@ -424,61 +381,38 @@ export default function StoryDrawer({
                   <tbody>
                     {summaryRows.length === 0 && (
                       <tr>
-                        <td
-                          colSpan={5}
-                          style={{
-                            padding: "12px 14px",
-                            textAlign: "center",
-                            color: "#6b7280",
-                          }}
-                        >
+                        <td colSpan={5} style={{ padding: "12px 14px", textAlign: "center", color: "#6b7280" }}>
                           No data
                         </td>
                       </tr>
                     )}
                     {summaryRows.map((r, i) => (
-                      <tr
-                        key={i}
-                        style={{ background: i % 2 ? "#fff" : "#fbfbfd" }}
-                      >
+                      <tr key={i} style={{ background: i % 2 ? "#fff" : "#fbfbfd" }}>
                         <td style={tdStyleLeft}>{r.label}</td>
                         <td style={tdStyleMono}>
-                          <span style={{ marginRight: 6 }}>
-                            {assetIcon(r.asset)}
-                          </span>
+                          <span style={{ marginRight: 6 }}>{assetIcon(r.asset)}</span>
                           {r.asset}
                         </td>
                         <td
-                          style={{
-                            ...tdStyleMono,
-                            color: r.in !== 0 ? "#047857" : "#6b7280",
-                          }}
-                          title={r.in.toString()}
+                          style={{ ...tdStyleMono, color: r.in !== 0 ? "#047857" : "#6b7280" }}
+                          title={String(r.in)}
                         >
-                          {r.in !== 0 ? `+${r.in}` : "—"}
+                          {r.in !== 0 ? `+${String(r.in)}` : "—"}
                         </td>
                         <td
-                          style={{
-                            ...tdStyleMono,
-                            color: r.out !== 0 ? "#b91c1c" : "#6b7280",
-                          }}
-                          title={r.out.toString()}
+                          style={{ ...tdStyleMono, color: r.out !== 0 ? "#b91c1c" : "#6b7280" }}
+                          title={String(r.out)}
                         >
-                          {r.out !== 0 ? `-${r.out}` : "—"}
+                          {r.out !== 0 ? `-${String(r.out)}` : "—"}
                         </td>
                         <td
                           style={{
                             ...tdStyleMonoBold,
-                            color:
-                              r.net === 0
-                                ? "#6b7280"
-                                : r.net > 0
-                                ? "#047857"
-                                : "#b91c1c",
+                            color: r.net === 0 ? "#6b7280" : r.net > 0 ? "#047857" : "#b91c1c",
                           }}
-                          title={r.net.toString()}
+                          title={String(r.net)}
                         >
-                          {r.net}
+                          {String(r.net)}
                         </td>
                       </tr>
                     ))}
@@ -541,8 +475,7 @@ export default function StoryDrawer({
                   style={{
                     ...inputStyle,
                     minHeight: 120,
-                    fontFamily:
-                      "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                     fontSize: 12,
                   }}
                   placeholder={`One per line:\nUSDT 3450.12345678\n0.015 BTC`}
@@ -556,8 +489,7 @@ export default function StoryDrawer({
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns:
-                      "minmax(140px,1fr) minmax(110px,1fr)",
+                    gridTemplateColumns: "minmax(140px,1fr) minmax(110px,1fr)",
                     gap: 8,
                     marginTop: 6,
                   }}
@@ -612,9 +544,7 @@ export default function StoryDrawer({
 
             <div className="card" style={{ marginTop: 8 }}>
               <div className="section-head" style={{ alignItems: "center" }}>
-                <h4 className="section-title">
-                  Daily Net Change (All assets)
-                </h4>
+                <h4 className="section-title">Daily Net Change (All assets)</h4>
               </div>
               <ChartLine data={dailySeries} height={240} />
             </div>
@@ -678,10 +608,7 @@ const tdBase: React.CSSProperties = { ...cellBase, color: "#111827" };
 
 const thStyleLeft: React.CSSProperties = { ...thBase, borderTopLeftRadius: 8 };
 const thStyle: React.CSSProperties = { ...thBase };
-const thStyleRight: React.CSSProperties = {
-  ...thBase,
-  borderTopRightRadius: 8,
-};
+const thStyleRight: React.CSSProperties = { ...thBase, borderTopRightRadius: 8 };
 
 const tdStyleLeft: React.CSSProperties = { ...tdBase, fontWeight: 500 };
 const tdStyleMono: React.CSSProperties = {
@@ -714,39 +641,29 @@ function buildDailyNet(rows: Row[]): LinePoint[] {
     const d = r.time.split(" ")[0];
     map.set(d, (map.get(d) || 0) + r.amount);
   }
-  const arr = Array.from(map.entries()).sort(([a], [b]) =>
-    a < b ? -1 : 1
-  );
+  const arr = Array.from(map.entries()).sort(([a], [b]) => (a < b ? -1 : 1));
   let cum = 0;
   return arr.map(([d, v]) => {
     cum += v;
     return { label: d, value: cum };
   });
 }
+
 function buildAssetNet(rows: Row[]): BarDatum[] {
   if (!rows?.length) return [];
   const map = new Map<string, number>();
   for (const r of rows) map.set(r.asset, (map.get(r.asset) || 0) + r.amount);
-  const arr = Array.from(map.entries()).map(([asset, net]) => ({
-    asset,
-    net,
-  }));
+  const arr = Array.from(map.entries()).map(([asset, net]) => ({ asset, net }));
   arr.sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
   return arr.slice(0, 12);
 }
-function ChartLine({
-  data,
-  height = 240,
-}: {
-  data: LinePoint[];
-  height?: number;
-}) {
+
+function ChartLine({ data, height = 240 }: { data: LinePoint[]; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(760);
   useEffect(() => {
     const obs = new ResizeObserver(() => {
-      if (ref.current)
-        setW(Math.max(560, ref.current.clientWidth - 24));
+      if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24));
     });
     if (ref.current) obs.observe(ref.current);
     return () => obs.disconnect();
@@ -762,97 +679,48 @@ function ChartLine({
   const minY = Math.min(0, Math.min(...data.map((d) => d.value)));
   const maxY = Math.max(0, Math.max(...data.map((d) => d.value)));
   const yScale = (v: number) =>
-    pad.t +
-    (maxY === minY
-      ? innerH / 2
-      : innerH - ((v - minY) / (maxY - minY)) * innerH);
-  const xScale = (i: number) =>
-    pad.l +
-    (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW);
+    pad.t + (maxY === minY ? innerH / 2 : innerH - ((v - minY) / (maxY - minY)) * innerH);
+  const xScale = (i: number) => pad.l + (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW);
 
-  const path = data
-    .map((d, i) => `${i === 0 ? "M" : "L"} ${xScale(i)} ${yScale(d.value)}`)
-    .join(" ");
+  const path = data.map((d, i) => `${i === 0 ? "M" : "L"} ${xScale(i)} ${yScale(d.value)}`).join(" ");
   const zeroY = yScale(0);
 
   return (
     <div ref={ref} style={{ overflow: "hidden" }}>
       <svg width={width} height={h}>
-        <line
-          x1={pad.l}
-          y1={zeroY}
-          x2={width - pad.r}
-          y2={zeroY}
-          stroke="#e5e7eb"
-        />
-        <line
-          x1={pad.l}
-          y1={pad.t}
-          x2={pad.l}
-          y2={h - pad.b}
-          stroke="#e5e7eb"
-        />
+        <line x1={pad.l} y1={zeroY} x2={width - pad.r} y2={zeroY} stroke="#e5e7eb" />
+        <line x1={pad.l} y1={pad.t} x2={pad.l} y2={h - pad.b} stroke="#e5e7eb" />
         <path d={path} fill="none" stroke="#2563eb" strokeWidth={2} />
         {data.map((d, i) => (
-          <circle
-            key={i}
-            cx={xScale(i)}
-            cy={yScale(d.value)}
-            r={2.5}
-            fill="#2563eb"
-          />
+          <circle key={i} cx={xScale(i)} cy={yScale(d.value)} r={2.5} fill="#2563eb" />
         ))}
         {data.map(
           (d, i) =>
             i % Math.ceil(data.length / 6) === 0 && (
-              <text
-                key={"x" + i}
-                x={xScale(i)}
-                y={h - 8}
-                textAnchor="middle"
-                fontSize="11"
-                fill="#6b7280"
-              >
+              <text key={"x" + i} x={xScale(i)} y={h - 8} textAnchor="middle" fontSize="11" fill="#6b7280">
                 {d.label.slice(5)}
               </text>
             )
         )}
         {[minY, (minY + maxY) / 2, maxY].map((val, i) => (
           <g key={"y" + i}>
-            <text
-              x={8}
-              y={yScale(val) + 4}
-              fontSize="11"
-              fill="#6b7280"
-            >
+            <text x={8} y={yScale(val) + 4} fontSize="11" fill="#6b7280">
               {val.toFixed(6).replace(/\.?0+$/, "")}
             </text>
-            <line
-              x1={pad.l - 4}
-              y1={yScale(val)}
-              x2={pad.l}
-              y2={yScale(val)}
-              stroke="#9ca3af"
-            />
+            <line x1={pad.l - 4} y1={yScale(val)} x2={pad.l} y2={yScale(val)} stroke="#9ca3af" />
           </g>
         ))}
       </svg>
     </div>
   );
 }
-function ChartBars({
-  data,
-  height = 280,
-}: {
-  data: { asset: string; net: number }[];
-  height?: number;
-}) {
+
+function ChartBars({ data, height = 280 }: { data: { asset: string; net: number }[]; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(760);
   useEffect(() => {
     const obs = new ResizeObserver(() => {
-      if (ref.current)
-        setW(Math.max(560, ref.current.clientWidth - 24));
+      if (ref.current) setW(Math.max(560, ref.current.clientWidth - 24));
     });
     if (ref.current) obs.observe(ref.current);
     return () => obs.disconnect();
@@ -871,13 +739,7 @@ function ChartBars({
   return (
     <div ref={ref} style={{ overflow: "hidden" }}>
       <svg width={width} height={height}>
-        <line
-          x1={pad.l}
-          y1={pad.t + innerH / 2}
-          x2={width - pad.r}
-          y2={pad.t + innerH / 2}
-          stroke="#e5e7eb"
-        />
+        <line x1={pad.l} y1={pad.t + innerH / 2} x2={width - pad.r} y2={pad.t + innerH / 2} stroke="#e5e7eb" />
         {data.map((d, i) => {
           const x = pad.l + (i * innerW) / data.length + 4;
           const h = Math.max(1, (Math.abs(d.net) / maxAbs) * (innerH / 2));
@@ -886,26 +748,14 @@ function ChartBars({
           return (
             <g key={d.asset}>
               <rect x={x} y={y} width={barW} height={h} fill={fill} rx={3} />
-              <text
-                x={x + barW / 2}
-                y={pad.t + innerH + 14}
-                textAnchor="middle"
-                fontSize="11"
-                fill="#374151"
-              >
+              <text x={x + barW / 2} y={pad.t + innerH + 14} textAnchor="middle" fontSize="11" fill="#374151">
                 {d.asset}
               </text>
             </g>
           );
         })}
         {[maxAbs, 0, -maxAbs].map((v, idx) => (
-          <text
-            key={idx}
-            x={8}
-            y={pad.t + innerH / 2 - (v / maxAbs) * (innerH / 2) + 4}
-            fontSize="11"
-            fill="#6b7280"
-          >
+          <text key={idx} x={8} y={pad.t + innerH / 2 - (v / maxAbs) * (innerH / 2) + 4} fontSize="11" fill="#6b7280">
             {v.toFixed(6).replace(/\.?0+$/, "")}
           </text>
         ))}
@@ -914,7 +764,7 @@ function ChartBars({
   );
 }
 
-// Small emoji-ish asset hints
+// Küçük emojili ikonlar
 function assetIcon(asset: string) {
   const a = asset.toUpperCase();
   if (a === "BTC") return "🟧";
