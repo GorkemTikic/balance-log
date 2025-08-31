@@ -1,545 +1,551 @@
 // src/lib/story.ts
-// Single-source narrative + audit + summary helpers.
-//
-// Goals from user:
-// - Friendly "GPT style" narrative (EN/TR/AR/VI/RU) with clear +/- semantics
-// - No fake zeros: omit types/assets that are 0 (or -0)
-// - Precise math (no rounding), but readable (trim trailing zeros)
-// - Coin Swaps & Auto-Exchange explained clearly (out vs in)
-// - Optional anchor time, optional baseline balances, optional anchor transfer
-// - Final wallet balance only (no extra "computed" wording)
-// - Suppress sub-dust tiny balances for BFUSD/FDUSD/LDUSDT in "final balances"
-
-export type Lang = "en" | "tr" | "ar" | "vi" | "ru";
+// Pure utilities for narrative/audit/summary. No React imports here.
 
 export type Row = {
-  id: string;
-  uid: string;
-  asset: string;
-  type: string;
-  amount: number;
-  time: string; // "YYYY-MM-DD HH:MM:SS"
-  ts: number;   // epoch ms (UTC)
-  symbol: string;
-  extra: string;
-  raw: string;
+  id: string; uid: string; asset: string; type: string; amount: number;
+  time: string; ts: number; symbol: string; extra: string; raw: string;
 };
 
-type BuildOpts = {
-  initialBalances?: Record<string, number> | undefined;
-  anchorTransfer?: { asset: string; amount: number } | undefined;
-  lang?: Lang;
+export type SummaryRow = { label: string; asset: string; in: number; out: number; net: number };
+
+// ---------------- Formatting ----------------
+const EPS = 1e-12;
+export function fmt(v: number) {
+  // “kuruşuna kadar” – tüm küsurat korunur; gereksiz 0’ları budar
+  const s = v.toFixed(18).replace(/0+$/,"").replace(/\.$/,"");
+  return s === "-0" ? "0" : s;
+}
+export function fmtSignedPlus(v: number) { return (v >= 0 ? "+" : "") + fmt(v); }
+export function nonZero(v: number) { return Math.abs(v) > EPS; }
+
+// ---------------- Known TYPE / i18n ----------------
+export type Lang = "en" | "tr" | "ar" | "vi" | "ru";
+
+const DICT: Record<Lang, Record<string,string>> = {
+  en: {
+    // sections
+    infoUTC: "All dates and times are UTC+0. Please adjust for your time zone.",
+    narrative: "Narrative",
+    afterThisTransfer: "If we check your transaction records after this transfer:",
+    yourRecords: "Here are your transaction records:",
+    anchorOnly: "At this date and time your Futures USDs-M Wallet balance was:",
+    anchorTransferTitle: "At this date and time, you transferred",
+    anchorTransferTo: "to your Futures USDs-M Wallet. After this transfer your balance increased from",
+    to: "to",
+    // lines
+    realizedProfit: "Realized Profit",
+    realizedLoss: "Realized Loss",
+    tradingFees: "Trading Fees",
+    fundingFees: "Funding Fees",
+    liqInsurance: "Liquidation/Insurance Clearance Fees",
+    referralIncomes: "Referral Incomes",
+    feeRebates: "Trading Fee Rebates",
+    giftMoney: "Gift Money",
+    posLimitIncrease: "Position Limit Increase Fee",
+    freePositions: "Free Positions",
+    deliverySettle: "Delivery Contracts Settlement Amount",
+    gridTo: "Transfer To the GridBot",
+    gridFrom: "Transfer From the GridBot",
+    futuresPresents: "Futures Presents",
+    eventsOrder: "Event Contracts — Order",
+    eventsPayout: "Event Contracts — Payout",
+    busdReward: "BUSD Reward",
+    coinSwap: "Coin Swaps",
+    coinSwapLine: "Swapped out: {out} — Received: {in}",
+    autoExchange: "Auto-Exchange",
+    autoExLine: "Converted out: {out} — Converted in: {in}",
+    otherTx: "Other Transactions",
+    overall: "Total effect in this range (by asset)",
+    finalAfter: "Final wallet balance (computed)",
+  },
+  tr: {
+    infoUTC: "Paylaşacağımız tüm tarih ve saatler UTC+0’dır. Lütfen kendi saat diliminize göre yorumlayın.",
+    narrative: "Hikâye",
+    afterThisTransfer: "Bu transferden sonraki işlem kayıtlarınıza bakarsak:",
+    yourRecords: "İşlem kayıtlarınız şöyle:",
+    anchorOnly: "Bu tarih ve saatte Futures USDs-M cüzdan bakiyeniz:",
+    anchorTransferTitle: "Bu tarih ve saatte",
+    anchorTransferTo: "tutarını Futures USDs-M cüzdanınıza aktardınız. Bu transferden sonra bakiyeniz",
+    to: "→",
+    realizedProfit: "Gerçekleşmiş Kâr",
+    realizedLoss: "Gerçekleşmiş Zarar",
+    tradingFees: "İşlem Ücretleri",
+    fundingFees: "Funding Ücretleri",
+    liqInsurance: "Likidasyon/Insurance Fon Kesintileri",
+    referralIncomes: "Referans Gelirleri",
+    feeRebates: "Komisyon İadeleri",
+    giftMoney: "Hediye (Kupon)",
+    posLimitIncrease: "Pozisyon Limit Artış Ücreti",
+    freePositions: "Ücretsiz Pozisyonlar",
+    deliverySettle: "Teslim Sözleşmeleri (Settlement)",
+    gridTo: "GridBot’a Transfer",
+    gridFrom: "GridBot’tan Transfer",
+    futuresPresents: "Futures Hediyeleri",
+    eventsOrder: "Event Contracts — Order",
+    eventsPayout: "Event Contracts — Payout",
+    busdReward: "BUSD Ödülü",
+    coinSwap: "Coin Swap",
+    coinSwapLine: "Çıkış: {out} — Giriş: {in}",
+    autoExchange: "Otomatik Dönüşüm (Auto-Exchange)",
+    autoExLine: "Dönüştürülen: {out} — Alınan: {in}",
+    otherTx: "Diğer İşlemler",
+    overall: "Bu aralıkta toplam etki (varlık bazında)",
+    finalAfter: "Hesaplanan nihai cüzdan bakiyesi",
+  },
+  ar: {
+    infoUTC: "جميع التواريخ والأوقات بتوقيت UTC+0. الرجاء ضبط منطقتك الزمنية وفقًا لذلك.",
+    narrative: "السرد",
+    afterThisTransfer: "إذا فحصنا سجلاتك بعد هذا التحويل:",
+    yourRecords: "إليك سجلات معاملاتك:",
+    anchorOnly: "في هذا التاريخ والوقت كان رصيد محفظة العقود الدائمة USDs-M لديك:",
+    anchorTransferTitle: "في هذا التاريخ والوقت قمت بتحويل",
+    anchorTransferTo: "إلى محفظة العقود الدائمة USDs-M. بعد التحويل أصبح الرصيد من",
+    to: "إلى",
+    realizedProfit: "الربح المحقق",
+    realizedLoss: "الخسارة المحققة",
+    tradingFees: "رسوم التداول",
+    fundingFees: "رسوم التمويل",
+    liqInsurance: "رسوم التصفية/صندوق التأمين",
+    referralIncomes: "عائدات الإحالة",
+    feeRebates: "استردادات الرسوم",
+    giftMoney: "أموال الهدايا",
+    posLimitIncrease: "رسوم زيادة حد المركز",
+    freePositions: "مراكز مجانية",
+    deliverySettle: "تسوية عقود التسليم",
+    gridTo: "تحويل إلى GridBot",
+    gridFrom: "تحويل من GridBot",
+    futuresPresents: "هدايا العقود الدائمة",
+    eventsOrder: "عقود الأحداث — أمر",
+    eventsPayout: "عقود الأحداث — دفعة",
+    busdReward: "مكافأة BUSD",
+    coinSwap: "تحويل العملات (Coin Swap)",
+    coinSwapLine: "المُحوّل للخارج: {out} — المستلم: {in}",
+    autoExchange: "التحويل التلقائي (Auto-Exchange)",
+    autoExLine: "تم تحويله للخارج: {out} — الوارد: {in}",
+    otherTx: "معاملات أخرى",
+    overall: "الأثر الإجمالي في هذه الفترة (حسب الأصل)",
+    finalAfter: "الرصيد النهائي للمحفظة (محسوب)",
+  },
+  vi: {
+    infoUTC: "Mọi ngày giờ đều theo UTC+0. Vui lòng quy đổi theo múi giờ của bạn.",
+    narrative: "Tường thuật",
+    afterThisTransfer: "Sau chuyển khoản này, nhật ký giao dịch như sau:",
+    yourRecords: "Nhật ký giao dịch của bạn:",
+    anchorOnly: "Tại thời điểm này, số dư ví Futures USDs-M của bạn là:",
+    anchorTransferTitle: "Tại thời điểm này, bạn đã chuyển",
+    anchorTransferTo: "vào ví Futures USDs-M. Sau chuyển khoản số dư tăng từ",
+    to: "đến",
+    realizedProfit: "Lãi đã chốt",
+    realizedLoss: "Lỗ đã chốt",
+    tradingFees: "Phí giao dịch",
+    fundingFees: "Phí funding",
+    liqInsurance: "Phí thanh lý/Bảo hiểm",
+    referralIncomes: "Thu nhập giới thiệu",
+    feeRebates: "Hoàn phí giao dịch",
+    giftMoney: "Tiền thưởng/phiếu",
+    posLimitIncrease: "Phí tăng hạn mức vị thế",
+    freePositions: "Vị thế miễn phí",
+    deliverySettle: "Thanh toán hợp đồng giao nhận",
+    gridTo: "Chuyển sang GridBot",
+    gridFrom: "Chuyển từ GridBot",
+    futuresPresents: "Quà tặng Futures",
+    eventsOrder: "Event Contracts — Order",
+    eventsPayout: "Event Contracts — Payout",
+    busdReward: "Thưởng BUSD",
+    coinSwap: "Coin Swap",
+    coinSwapLine: "Đã hoán đổi ra: {out} — Nhận về: {in}",
+    autoExchange: "Auto-Exchange",
+    autoExLine: "Đổi ra: {out} — Nhận: {in}",
+    otherTx: "Giao dịch khác",
+    overall: "Tổng ảnh hưởng trong kỳ (theo tài sản)",
+    finalAfter: "Số dư ví cuối (tính toán)",
+  },
+  ru: {
+    infoUTC: "Все даты и время указаны в UTC+0. Пожалуйста, учитывайте ваш часовой пояс.",
+    narrative: "История",
+    afterThisTransfer: "После этого перевода в ваших записях:",
+    yourRecords: "Ваши записи операций:",
+    anchorOnly: "На этот момент баланс кошелька Futures USDs-M был:",
+    anchorTransferTitle: "В этот момент вы перевели",
+    anchorTransferTo: "на кошелек Futures USDs-M. После перевода баланс изменился с",
+    to: "на",
+    realizedProfit: "Зафиксированная прибыль",
+    realizedLoss: "Зафиксированный убыток",
+    tradingFees: "Комиссии за торговлю",
+    fundingFees: "Funding комиссии",
+    liqInsurance: "Страховой/ликвидационный сбор",
+    referralIncomes: "Реферальные доходы",
+    feeRebates: "Ребейты комиссий",
+    giftMoney: "Подарки/купоны",
+    posLimitIncrease: "Плата за увеличение лимита позиции",
+    freePositions: "Бесплатные позиции",
+    deliverySettle: "Расчеты по поставочным контрактам",
+    gridTo: "Перевод в GridBot",
+    gridFrom: "Перевод из GridBot",
+    futuresPresents: "Подарки Futures",
+    eventsOrder: "Event Contracts — Order",
+    eventsPayout: "Event Contracts — Payout",
+    busdReward: "Награда BUSD",
+    coinSwap: "Coin Swap",
+    coinSwapLine: "Отдано: {out} — Получено: {in}",
+    autoExchange: "Auto-Exchange",
+    autoExLine: "Преобразовано: {out} — Зачислено: {in}",
+    otherTx: "Прочие операции",
+    overall: "Суммарный эффект за период (по активам)",
+    finalAfter: "Итоговый баланс кошелька (расчет)",
+  }
 };
 
-type AuditOpts = {
-  anchorTs: number;
-  endTs?: number;
-  baseline?: Record<string, number> | undefined;
-  anchorTransfer?: { asset: string; amount: number } | undefined;
-};
+// TYPE keys possibly present in logs (extendable)
+export const TYPE = {
+  TRANSFER: "TRANSFER",
+  REALIZED_PNL: "REALIZED_PNL",
+  FUNDING_FEE: "FUNDING_FEE",
+  COMMISSION: "COMMISSION",
+  INSURANCE_CLEAR: "INSURANCE_CLEAR",
+  WELCOME_BONUS: "WELCOME_BONUS",
+  REFERRAL_KICKBACK: "REFERRAL_KICKBACK",
+  COMISSION_REBATE: "COMISSION_REBATE",
+  CASH_COUPON: "CASH_COUPON",
+  COIN_SWAP_DEPOSIT: "COIN_SWAP_DEPOSIT",
+  COIN_SWAP_WITHDRAW: "COIN_SWAP_WITHDRAW",
+  POSITION_LIMIT_INCREASE_FEE: "POSITION_LIMIT_INCREASE_FEE",
+  POSITION_CLAIM_TRANSFER: "POSITION_CLAIM_TRANSFER",
+  AUTO_EXCHANGE: "AUTO_EXCHANGE",
+  DELIVERED_SETTELMENT: "DELIVERED_SETTELMENT",
+  STRATEGY_UMFUTURES_TRANSFER: "STRATEGY_UMFUTURES_TRANSFER",
+  FUTURES_PRESENT: "FUTURES_PRESENT",
+  EVENT_CONTRACTS_ORDER: "EVENT_CONTRACTS_ORDER",
+  EVENT_CONTRACTS_PAYOUT: "EVENT_CONTRACTS_PAYOUT",
+  INTERNAL_COMMISSION: "INTERNAL_COMMISSION",
+  INTERNAL_TRANSFER: "INTERNAL_TRANSFER",
+  BFUSD_REWARD: "BFUSD_REWARD",
+  INTERNAL_AGENT_REWARD: "INTERNAL_AGENT_REWARD",
+  API_REBATE: "API_REBATE",
+  CONTEST_REWARD: "CONTEST_REWARD",
+  INTERNAL_CONTEST_REWARD: "INTERNAL_CONTEST_REWARD",
+  CROSS_COLLATERAL_TRANSFER: "CROSS_COLLATERAL_TRANSFER",
+  OPTIONS_PREMIUM_FEE: "OPTIONS_PREMIUM_FEE",
+  OPTIONS_SETTLE_PROFIT: "OPTIONS_SETTLE_PROFIT",
+  LIEN_CLAIM: "LIEN_CLAIM",
+  INTERNAL_COMMISSION_REBATE: "INTERNAL_COMMISSION_REBATE",
+  FEE_RETURN: "FEE_RETURN",
+  FUTURES_PRESENT_SPONSOR_REFUND: "FUTURES_PRESENT_SPONSOR_REFUND",
+} as const;
 
-// —————————————————————————————————————————————————————————————
-// utilities
-
-const DUST_HIDE: Record<string, number> = {
-  BFUSD: 1e-7,
-  FDUSD: 1e-7,
-  LDUSDT: 1e-7,
-};
-
-function isZero(n: number) {
-  // treat -0 as 0
-  return Object.is(n, -0) || n === 0;
-}
-
-function fmt(n: number) {
-  // show full precision but avoid sci-notation; trim trailing zeros
-  // 18 dp is plenty for these logs and keeps sums exact enough for UI
-  const s = n.toFixed(18);
-  return s.replace(/\.?0+$/, "");
-}
-
-function sumInto(map: Record<string, number>, k: string, v: number) {
-  map[k] = (map[k] ?? 0) + v;
-  if (Math.abs(map[k]) < 1e-18) map[k] = 0; // normalize -0 noise
-}
-
-function filterByTime(rows: Row[], anchorISO?: string) {
-  if (!anchorISO) return rows;
-  const ts = Date.parse(anchorISO + "Z");
-  if (!Number.isFinite(ts)) return rows;
-  return rows.filter(r => r.ts >= ts);
-}
-
-function label(lang: Lang | undefined, key: string) {
-  const l = lang ?? "en";
-  const dict: Record<string, Record<Lang, string>> = {
-    headerNotice: {
-      en: "All dates and times are UTC+0. Please adjust for your time zone.",
-      tr: "Tüm tarih ve saatler UTC+0’dır. Lütfen zaman diliminize göre düşünün.",
-      ar: "جميع التواريخ والأوقات بتوقيت UTC+0. يرجى الضبط وفق منطقتك الزمنية.",
-      vi: "Mọi ngày giờ đều theo UTC+0. Vui lòng điều chỉnh theo múi giờ của bạn.",
-      ru: "Все даты и время указаны в UTC+0. Пожалуйста, учитывайте ваш часовой пояс.",
-    },
-    introWithTransfer: {
-      en: (ts: string, amt: string, asset: string, b0?: string, b1?: string) =>
-        `${ts} — At this date and time, you transferred ${amt} ${asset} to your Futures USDs-M Wallet${b0 && b1 ? `. After this transfer your balance increased from ${b0} ${asset} to ${b1} ${asset}.` : "."}`,
-      tr: (ts, amt, asset, b0?, b1?) =>
-        `${ts} — Bu tarih ve saatte, Futures USDs-M cüzdanına ${amt} ${asset} aktardın${b0 && b1 ? `. Bu transferden sonra bakiyen ${b0} ${asset} değerinden ${b1} ${asset} değerine yükseldi.` : "."}`,
-      ar: (ts, amt, asset, b0?, b1?) =>
-        `${ts} — في هذا التاريخ والوقت قمت بتحويل ${amt} ${asset} إلى محفظة عقود USDs-M${b0 && b1 ? `. بعد التحويل ارتفع رصيدك من ${b0} ${asset} إلى ${b1} ${asset}.` : "."}`,
-      vi: (ts, amt, asset, b0?, b1?) =>
-        `${ts} — Tại thời điểm này bạn đã chuyển ${amt} ${asset} vào ví Futures USDs-M${b0 && b1 ? `. Sau chuyển khoản, số dư tăng từ ${b0} ${asset} lên ${b1} ${asset}.` : "."}`,
-      ru: (ts, amt, asset, b0?, b1?) =>
-        `${ts} — В это время вы перевели ${amt} ${asset} на кошелёк Futures USDs-M${b0 && b1 ? `. После перевода баланс вырос с ${b0} ${asset} до ${b1} ${asset}.` : "."}`,
-    },
-    introNoTransfer: {
-      en: "Here are your transaction records:",
-      tr: "İşte işlem kayıtların:",
-      ar: "هذه هي سجلات معاملاتك:",
-      vi: "Đây là lịch sử giao dịch của bạn:",
-      ru: "Вот ваши записи по операциям:",
-    },
-    introWithBalanceOnly: {
-      en: (ts: string, amt: string, asset: string) =>
-        `${ts} — At this date and time your Futures USDs-M Wallet balance was: ${amt} ${asset}.`,
-      tr: (ts, amt, asset) =>
-        `${ts} — Bu tarih ve saatte Futures USDs-M cüzdan bakiyen: ${amt} ${asset}.`,
-      ar: (ts, amt, asset) =>
-        `${ts} — في هذا التاريخ والوقت كان رصيد محفظة USDs-M لديك: ${amt} ${asset}.`,
-      vi: (ts, amt, asset) =>
-        `${ts} — Tại thời điểm này, số dư ví Futures USDs-M của bạn là: ${amt} ${asset}.`,
-      ru: (ts, amt, asset) =>
-        `${ts} — В этот момент баланс кошелька Futures USDs-M составлял: ${amt} ${asset}.`,
-    },
-    sectionAfter: {
-      en: "If we check your transaction records after this point:",
-      tr: "Bu noktadan sonraki işlem kayıtlarına bakarsak:",
-      ar: "إذا راجعنا السجلات بعد هذه النقطة:",
-      vi: "Nếu xem các giao dịch sau thời điểm này:",
-      ru: "Если посмотреть операции после этой точки:",
-    },
-    // Section titles
-    realizedProfit: {
-      en: "Realized Profit",
-      tr: "Gerçekleşen Kâr",
-      ar: "الربح المُحقق",
-      vi: "Lãi đã chốt",
-      ru: "Зафиксированная прибыль",
-    },
-    realizedLoss: {
-      en: "Realized Loss",
-      tr: "Gerçekleşen Zarar",
-      ar: "الخسارة المُحققة",
-      vi: "Lỗ đã chốt",
-      ru: "Зафиксированный убыток",
-    },
-    tradingFees: {
-      en: "Trading Fees",
-      tr: "İşlem Ücretleri",
-      ar: "عمولات التداول",
-      vi: "Phí giao dịch",
-      ru: "Комиссии",
-    },
-    fundingFees: {
-      en: "Funding Fees",
-      tr: "Fonlama Ücretleri",
-      ar: "رسوم التمويل",
-      vi: "Phí funding",
-      ru: "Фандинг",
-    },
-    insurance: {
-      en: "Liquidation / Insurance Clearance",
-      tr: "Likidasyon / Sigorta Kesintisi",
-      ar: "تصفية / صندوق التأمين",
-      vi: "Thanh lý / Quỹ bảo hiểm",
-      ru: "Ликвидация / Фонд страхования",
-    },
-    referral: {
-      en: "Referral Incomes",
-      tr: "Davet Gelirleri",
-      ar: "عوائد الإحالة",
-      vi: "Thu nhập giới thiệu",
-      ru: "Реферальные доходы",
-    },
-    rebate: {
-      en: "Trading Fee Rebates",
-      tr: "Komisyon İadeleri",
-      ar: "استرداد عمولات",
-      vi: "Hoàn phí giao dịch",
-      ru: "Ребейты комиссий",
-    },
-    gift: {
-      en: "Gift Money",
-      tr: "Hediye Bakiye",
-      ar: "أموال هدية",
-      vi: "Tiền thưởng",
-      ru: "Подарочные средства",
-    },
-    posLimit: {
-      en: "Position Limit Increase Fee",
-      tr: "Pozisyon Limiti Artış Ücreti",
-      ar: "رسوم رفع حدود المراكز",
-      vi: "Phí tăng hạn mức vị thế",
-      ru: "Плата за увеличение лимита позиции",
-    },
-    freePos: {
-      en: "Free Positions",
-      tr: "Ücretsiz Pozisyonlar",
-      ar: "مراكز مجانية",
-      vi: "Vị thế miễn phí",
-      ru: "Бесплатные позиции",
-    },
-    delivered: {
-      en: "Delivery Contracts Settlement",
-      tr: "Vadeli Teslim Sözleşmelerinin Kapanışı",
-      ar: "تسوية عقود التسليم",
-      vi: "Thanh toán hợp đồng giao hàng",
-      ru: "Расчёт поставочных контрактов",
-    },
-    umTransferTo: {
-      en: "Transfer To the GridBot",
-      tr: "Grid Bot’a Transfer",
-      ar: "تحويل إلى Grid Bot",
-      vi: "Chuyển tới Grid Bot",
-      ru: "Перевод в Grid Bot",
-    },
-    umTransferFrom: {
-      en: "Transfer From the GridBot",
-      tr: "Grid Bot’tan Transfer",
-      ar: "تحويل من Grid Bot",
-      vi: "Chuyển từ Grid Bot",
-      ru: "Перевод из Grid Bot",
-    },
-    presents: {
-      en: "Futures Presents",
-      tr: "Futures Hediyeleri",
-      ar: "هدايا العقود",
-      vi: "Quà tặng Futures",
-      ru: "Подарки Futures",
-    },
-    eventOrder: {
-      en: "Event Contracts — Order",
-      tr: "Event Contracts — Order",
-      ar: "عقود الفعاليات — أمر",
-      vi: "Hợp đồng Sự kiện — Order",
-      ru: "Контракты-события — Order",
-    },
-    eventPayout: {
-      en: "Event Contracts — Payout",
-      tr: "Event Contracts — Payout",
-      ar: "عقود الفعاليات — Payout",
-      vi: "Hợp đồng Sự kiện — Payout",
-      ru: "Контракты-события — Payout",
-    },
-    busdReward: {
-      en: "BFUSD Reward",
-      tr: "BFUSD Ödülü",
-      ar: "مكافأة BFUSD",
-      vi: "Thưởng BFUSD",
-      ru: "Награда BFUSD",
-    },
-    swaps: {
-      en: "Coin Swaps",
-      tr: "Coin Swap İşlemleri",
-      ar: "مقايضات عملات",
-      vi: "Hoán đổi coin",
-      ru: "Coin-свопы",
-    },
-    autoEx: {
-      en: "Auto-Exchange",
-      tr: "Otomatik Dönüşüm",
-      ar: "التحويل التلقائي",
-      vi: "Tự động quy đổi",
-      ru: "Авто-обмен",
-    },
-    others: {
-      en: "Other Transactions",
-      tr: "Diğer İşlemler",
-      ar: "معاملات أخرى",
-      vi: "Giao dịch khác",
-      ru: "Прочие операции",
-    },
-    final: {
-      en: "Final wallet balance",
-      tr: "Nihai cüzdan bakiyesi",
-      ar: "الرصيد النهائي للمحفظة",
-      vi: "Số dư ví cuối cùng",
-      ru: "Итоговый баланс кошелька",
-    },
-  };
-  const v = dict[key];
-  if (!v) return key;
-  return typeof v[l] === "function" ? (v[l] as any) : v[l];
-}
-
-// Groups for narrative & summary
-const MAP: Record<string, { group: string; labelKey: string; role?: "profit" | "loss" | "feeIn" | "feeOut" | "order" | "payout" | "rebate" | "gift" | "transferIn" | "transferOut" } | undefined> = {
-  REALIZED_PNL: { group: "rpn", labelKey: "" },
-  COMMISSION: { group: "commission", labelKey: "tradingFees", role: "feeOut" },
-  FUNDING_FEE: { group: "funding", labelKey: "fundingFees" },
-  INSURANCE_CLEAR: { group: "insurance", labelKey: "insurance" },
-  LIQUIDATION_FEE: { group: "insurance", labelKey: "insurance" },
-  REFERRAL_KICKBACK: { group: "referral", labelKey: "referral", role: "rebate" },
-  COMISSION_REBATE: { group: "rebate", labelKey: "rebate", role: "rebate" },
-  CASH_COUPON: { group: "gift", labelKey: "gift", role: "gift" },
-  POSITION_LIMIT_INCREASE_FEE: { group: "poslimit", labelKey: "posLimit", role: "feeOut" },
-  POSITION_CLAIM_TRANSFER: { group: "freepos", labelKey: "freePos" },
-  DELIVERED_SETTELMENT: { group: "delivered", labelKey: "delivered" },
-  STRATEGY_UMFUTURES_TRANSFER: { group: "um", labelKey: "" },
-  FUTURES_PRESENT: { group: "presents", labelKey: "presents" },
-  EVENT_CONTRACTS_ORDER: { group: "eventOrder", labelKey: "eventOrder", role: "order" },
-  EVENT_CONTRACTS_PAYOUT: { group: "eventPayout", labelKey: "eventPayout", role: "payout" },
-  BFUSD_REWARD: { group: "busd", labelKey: "busdReward" },
-  AUTO_EXCHANGE: { group: "auto", labelKey: "autoEx" },
-  COIN_SWAP_DEPOSIT: { group: "swap", labelKey: "swaps" },
-  COIN_SWAP_WITHDRAW: { group: "swap", labelKey: "swaps" },
-  TRANSFER: { group: "transfer", labelKey: "" },
-};
-
-function pick<T>(obj: Record<string, T>, keys: string[]) {
-  const out: Record<string, T> = {};
-  for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
-  return out;
-}
-
-// —————————————————————————————————————————————————————————————
-// PUBLIC: buildSummaryRows
-
-export type SummaryRow = { label: string; asset: string; in: string | number; out: string | number; net: string | number };
-
-export function buildSummaryRows(rows: Row[]): SummaryRow[] {
-  const byTypeAsset: Record<string, Record<string, { in: number; out: number }>> = {};
+type Totals = Record<string, { pos: number; neg: number; net: number }>;
+export function totalsByType(rows: Row[]) {
+  const map: Record<string, Totals> = {};
   for (const r of rows) {
-    const m = MAP[r.type] || { group: "other", labelKey: "others" };
-    const tLabel = m.labelKey || r.type;
-    byTypeAsset[tLabel] ||= {};
-    const a = (byTypeAsset[tLabel][r.asset] ||= { in: 0, out: 0 });
-    if (r.amount >= 0) a.in += r.amount; else a.out += Math.abs(r.amount);
+    const tt = (map[r.type] = map[r.type] || {});
+    const m = (tt[r.asset] = tt[r.asset] || { pos: 0, neg: 0, net: 0 });
+    if (r.amount >= 0) m.pos += r.amount; else m.neg += Math.abs(r.amount);
+    m.net += r.amount;
   }
-  const rowsOut: SummaryRow[] = [];
-  for (const [label, assets] of Object.entries(byTypeAsset)) {
-    for (const [asset, v] of Object.entries(assets)) {
-      const net = v.in - v.out;
-      if (isZero(v.in) && isZero(v.out) && isZero(net)) continue;
-      rowsOut.push({
-        label,
-        asset,
-        in: isZero(v.in) ? 0 : fmt(v.in),
-        out: isZero(v.out) ? 0 : fmt(v.out),
-        net: isZero(net) ? 0 : fmt(net),
-      });
-    }
-  }
-  return rowsOut;
+  return map;
 }
 
-// —————————————————————————————————————————————————————————————
-// PUBLIC: buildAudit
-
-export function buildAudit(rows: Row[], opts: AuditOpts): string {
-  const { anchorTs, endTs, baseline, anchorTransfer } = opts;
-
-  const windowed = rows.filter(r => r.ts >= anchorTs && (!endTs || r.ts <= endTs));
-  const nets: Record<string, number> = {};
-  for (const r of windowed) sumInto(nets, r.asset, r.amount);
-
-  // start from baseline (if any)
-  const final: Record<string, number> = {};
-  if (baseline) for (const [asset, bal] of Object.entries(baseline)) final[asset.toUpperCase()] = bal;
-
-  // apply anchor transfer first (if any)
-  if (anchorTransfer) sumInto(final, anchorTransfer.asset.toUpperCase(), anchorTransfer.amount);
-
-  // then activity
-  for (const [asset, v] of Object.entries(nets)) sumInto(final, asset, v);
-
-  // suppress dust for selected assets
-  for (const [asset, thr] of Object.entries(DUST_HIDE)) {
-    if (Math.abs(final[asset] ?? 0) < thr) final[asset] = 0;
-  }
-
-  const lines: string[] = [];
-  lines.push("Agent Balance Audit");
-  lines.push("");
-  lines.push("Net effect (after anchor):");
-  const ordered = Object.entries(nets).sort((a, b) => a[0].localeCompare(b[0]));
-  for (const [asset, v] of ordered) if (!isZero(v)) lines.push(`  • ${asset}  ${fmt(v)}`);
-
-  lines.push("");
-  lines.push("Final expected balances:");
-  const ordF = Object.entries(final).filter(([,v]) => !isZero(v)).sort((a, b) => a[0].localeCompare(b[0]));
-  if (!ordF.length) lines.push("  • (no non-zero balances)");
-  for (const [asset, v] of ordF) lines.push(`  • ${asset}  ${fmt(v)}`);
-
-  return lines.join("\n");
-}
-
-// —————————————————————————————————————————————————————————————
-// PUBLIC: buildNarrativeParagraphs
-
+// ---------- Narrative builder ----------
 export function buildNarrativeParagraphs(
   rows: Row[],
   anchorISO?: string,
-  opts?: BuildOpts,
+  opts?: {
+    initialBalances?: Record<string, number>;
+    anchorTransfer?: { asset: string; amount: number };
+    lang?: Lang;
+  }
 ): string {
-  const lang = opts?.lang ?? "en";
-  const filtered = filterByTime(rows, anchorISO);
-  const parts: string[] = [];
+  const L = DICT[opts?.lang || "en"];
+  const tmap = totalsByType(rows);
 
-  // header notice
-  parts.push(label(lang, "headerNotice") as string);
-
-  const anchorTransfer = opts?.anchorTransfer;
-  if (anchorTransfer) {
-    const t = (label(lang, "introWithTransfer") as any)(
-      anchorISO ?? "",
-      fmt(anchorTransfer.amount),
-      anchorTransfer.asset,
-      opts?.initialBalances ? fmt(opts.initialBalances[anchorTransfer.asset] ?? 0) : undefined,
-      opts?.initialBalances ? fmt((opts.initialBalances[anchorTransfer.asset] ?? 0) + anchorTransfer.amount) : undefined,
-    );
-    parts.push(t);
-    parts.push(label(lang, "sectionAfter") as string);
-  } else if (anchorISO && opts?.initialBalances && Object.keys(opts.initialBalances).length === 1) {
-    const [asset, bal] = Object.entries(opts.initialBalances)[0];
-    parts.push((label(lang, "introWithBalanceOnly") as any)(anchorISO, fmt(bal), asset));
-    parts.push(label(lang, "sectionAfter") as string);
-  } else if (!anchorISO) {
-    parts.push(label(lang, "introNoTransfer") as string);
-  }
-
-  // aggregate helpers
-  const agg = (filter: (r: Row) => boolean) => {
-    const byAsset: Record<string, number> = {};
-    for (const r of filtered) if (filter(r)) sumInto(byAsset, r.asset, r.amount);
-    return byAsset;
-  };
-
-  const realized = filtered.filter(r => r.type === "REALIZED_PNL");
-  const realizedProfit = agg(r => r.type === "REALIZED_PNL" && r.amount > 0);
-  const realizedLoss = agg(r => r.type === "REALIZED_PNL" && r.amount < 0);
-  const commission = agg(r => r.type === "COMMISSION");
-  const fundingIn = agg(r => r.type === "FUNDING_FEE" && r.amount > 0);
-  const fundingOut = agg(r => r.type === "FUNDING_FEE" && r.amount < 0);
-  const insurance = agg(r => r.type === "INSURANCE_CLEAR" || r.type === "LIQUIDATION_FEE");
-  const referral = agg(r => r.type === "REFERRAL_KICKBACK");
-  const rebate = agg(r => r.type === "COMISSION_REBATE");
-  const gift = agg(r => r.type === "CASH_COUPON");
-  const posLimit = agg(r => r.type === "POSITION_LIMIT_INCREASE_FEE");
-  const freePos = agg(r => r.type === "POSITION_CLAIM_TRANSFER");
-  const delivered = agg(r => r.type === "DELIVERED_SETTELMENT");
-  const umTo = agg(r => r.type === "STRATEGY_UMFUTURES_TRANSFER" && r.amount < 0);
-  const umFrom = agg(r => r.type === "STRATEGY_UMFUTURES_TRANSFER" && r.amount > 0);
-  const presents = agg(r => r.type === "FUTURES_PRESENT");
-  const eventOrder = agg(r => r.type === "EVENT_CONTRACTS_ORDER");
-  const eventPayout = agg(r => r.type === "EVENT_CONTRACTS_PAYOUT");
-  const busdReward = agg(r => r.type === "BFUSD_REWARD");
-
-  // swaps & auto-exchange (in/out lists)
-  function listOutIn(titleKey: string, outs: Record<string, number>, ins: Record<string, number>) {
-    const outsL = Object.entries(outs).filter(([,v]) => v < 0 || v > 0 && false).map(([a, v]) => `${a} ${fmt(Math.abs(v))}`).join(" • ");
-    const insL  = Object.entries(ins).filter(([,v]) => v < 0 || v > 0 && false).map(([a, v]) => `${a} ${fmt(Math.abs(v))}`).join(" • ");
-    if (!outsL && !insL) return;
-    const title = label(lang, titleKey) as string;
-    const outText = outsL ? `Swapped out: ${outsL}` : "";
-    const inText  = insL  ? ` — Received: ${insL}` : "";
-    parts.push(`${title}: ${outText}${inText}`.replace(/: $/, ": (no entries)"));
-  }
-
-  // Coin Swaps
-  const swapOut = agg(r => r.type === "COIN_SWAP_WITHDRAW");
-  const swapIn  = agg(r => r.type === "COIN_SWAP_DEPOSIT");
-  listOutIn("swaps", swapOut, swapIn);
-
-  // Auto-Exchange
-  const autoOut = agg(r => r.type === "AUTO_EXCHANGE" && r.amount < 0);
-  const autoIn  = agg(r => r.type === "AUTO_EXCHANGE" && r.amount > 0);
-  if (Object.keys(autoOut).length || Object.keys(autoIn).length) {
-    const outs = Object.entries(autoOut).map(([a,v]) => `${a} ${fmt(Math.abs(v))}`).join(" • ");
-    const ins  = Object.entries(autoIn).map(([a,v]) => `${a} ${fmt(Math.abs(v))}`).join(" • ");
-    const line = `${label(lang, "autoEx")}: ${outs ? `Converted out: ${outs}` : ""}${ins ? `${outs ? " — " : ""}Converted in: ${ins}` : ""}`;
-    parts.push(line);
-  }
-
-  // writer helper
-  const writeBlock = (titleKey: string, plus?: Record<string, number>, minus?: Record<string, number>, net?: boolean) => {
-    const title = label(lang, titleKey) as string;
-    const posL = plus ? Object.entries(plus).filter(([,v]) => v > 0).map(([a,v]) => `${a} +${fmt(v)}`).join("  •  ") : "";
-    const negL = minus ? Object.entries(minus).filter(([,v]) => v < 0).map(([a,v]) => `${a} -${fmt(Math.abs(v))}`).join("  •  ") : "";
-    if (!posL && !negL) return;
-    if (net) {
-      // compute per-asset net
-      const assets = new Set<string>([
-        ...Object.keys(plus || {}),
-        ...Object.keys(minus || {}),
-      ]);
-      const nets: string[] = [];
-      for (const a of assets) {
-        const p = (plus?.[a] ?? 0);
-        const m = Math.abs(minus?.[a] ?? 0);
-        const n = p - m;
-        if (isZero(n)) continue;
-        nets.push(`${a} ${n > 0 ? "+" : ""}${fmt(n)}`);
+  // Helper to print a line for a “label: assets (positive/negative grouping)”.
+  function lineFor(label: string, fromTypes: string[] | "profitLoss" | "gridSplit") {
+    const acc: Record<string, { in: number; out: number; net: number }> = {};
+    if (fromTypes === "profitLoss") {
+      const tt = tmap[TYPE.REALIZED_PNL] || {};
+      for (const a of Object.keys(tt)) {
+        const m = acc[a] || (acc[a] = { in: 0, out: 0, net: 0 });
+        m.in += Math.max(0, tt[a].pos - 0);       // positive amounts
+        m.out += Math.max(0, tt[a].neg - 0);      // negatives as separate
+        m.net += tt[a].net;
       }
-      parts.push(`${title}: ${[
-        posL ? posL : "",
-        negL ? negL : "",
-        nets.length ? `= ${nets.join("  •  ")}` : "",
-      ].filter(Boolean).join("  /  ")}`);
-    } else {
-      parts.push(`${title}: ${[posL, negL].filter(Boolean).join("  /  ")}`);
+      const pos: string[] = [], neg: string[] = [];
+      for (const a of Object.keys(acc)) {
+        if (nonZero(acc[a].in))  pos.push(`${a}  ${fmt(acc[a].in)}`);
+        if (nonZero(acc[a].out)) neg.push(`${a}  ${fmt(acc[a].out)}`);
+      }
+      const lines: string[] = [];
+      if (pos.length) lines.push(`${L.realizedProfit}: ${pos.join("  •  ")}`);
+      if (neg.length) lines.push(`${L.realizedLoss}: ${neg.join("  •  ")}`);
+      return lines;
     }
-  };
 
-  writeBlock("realizedProfit", realizedProfit);
-  writeBlock("realizedLoss", Object.fromEntries(Object.entries(realizedLoss).map(([a,v]) => [a, v]))); // keep sign
-  writeBlock("tradingFees", undefined, Object.fromEntries(Object.entries(commission).map(([a,v]) => [a, -Math.abs(v)])), false);
-  writeBlock("fundingFees", fundingIn, Object.fromEntries(Object.entries(fundingOut).map(([a,v]) => [a, -Math.abs(v)])), true);
-  writeBlock("insurance", undefined, Object.fromEntries(Object.entries(insurance).map(([a,v]) => [a, -Math.abs(v)])));
-  writeBlock("referral", referral);
-  writeBlock("rebate", rebate);
-  writeBlock("gift", gift);
-  writeBlock("posLimit", undefined, Object.fromEntries(Object.entries(posLimit).map(([a,v]) => [a, -Math.abs(v)])));
-  writeBlock("freePos", freePos);
-  writeBlock("delivered", delivered);
-  writeBlock("umTransferFrom", umFrom);
-  writeBlock("umTransferTo", Object.fromEntries(Object.entries(umTo).map(([a,v]) => [a, -Math.abs(v)])));
-  writeBlock("presents", presents);
-  writeBlock("eventOrder", undefined, Object.fromEntries(Object.entries(eventOrder).map(([a,v]) => [a, -Math.abs(v)])));
-  writeBlock("eventPayout", eventPayout);
-  writeBlock("busdReward", busdReward);
+    if (fromTypes === "gridSplit") {
+      const tt = tmap[TYPE.STRATEGY_UMFUTURES_TRANSFER] || {};
+      const toGrid: string[] = [], fromGrid: string[] = [];
+      for (const a of Object.keys(tt)) {
+        const pos = tt[a].pos, neg = tt[a].neg;
+        if (nonZero(neg)) toGrid.push(`${a}  ${fmt(neg)}`);
+        if (nonZero(pos)) fromGrid.push(`${a}  ${fmt(pos)}`);
+      }
+      const out: string[] = [];
+      if (fromGrid.length) out.push(`${L.gridFrom}: ${fromGrid.join("  •  ")}`);
+      if (toGrid.length)   out.push(`${L.gridTo}: ${toGrid.join("  •  ")}`);
+      return out;
+    }
 
-  // Other types
-  const known = new Set(Object.keys(MAP));
-  const others = filtered.filter(r => !known.has(r.type));
-  if (others.length) {
-    const byAsset: Record<string, number> = {};
-    for (const r of others) sumInto(byAsset, r.asset, r.amount);
-    const list = Object.entries(byAsset).filter(([,v]) => !isZero(v)).map(([a,v]) => `${a} ${v > 0 ? "+" : ""}${fmt(v)}`).join("  •  ");
-    if (list) parts.push(`${label(lang, "others")}: ${list}`);
+    for (const k of (fromTypes as string[])) {
+      const tt = tmap[k] || {};
+      for (const a of Object.keys(tt)) {
+        const m = (acc[a] = acc[a] || { in: 0, out: 0, net: 0 });
+        m.in += tt[a].pos; m.out += tt[a].neg; m.net += tt[a].net;
+      }
+    }
+
+    const pieces: string[] = [];
+    for (const a of Object.keys(acc)) {
+      const m = acc[a];
+      const parts: string[] = [];
+      if (nonZero(m.in))  parts.push(`+${fmt(m.in)}`);
+      if (nonZero(m.out)) parts.push(`-${fmt(m.out)}`);
+      if (!parts.length) continue;
+      parts.push(`= ${fmt(m.net)}`);
+      pieces.push(`${a}  ${parts.join("  /  ")}`);
+    }
+    return pieces.length ? [`${label}: ${pieces.join("  •  ")}`] : [];
   }
 
-  // Final wallet balance by asset (baseline + anchorTransfer + activity)
-  const nets: Record<string, number> = {};
-  for (const r of filtered) sumInto(nets, r.asset, r.amount);
-  if (opts?.initialBalances) {
-    for (const [a, b] of Object.entries(opts.initialBalances)) sumInto(nets, a.toUpperCase(), b);
+  // Coin Swap / Auto-Exchange – clear phrasing
+  function swapOrAutoLines(kind: "coin" | "auto") {
+    const deposit = kind === "coin" ? tmap[TYPE.COIN_SWAP_DEPOSIT] || {} : {};
+    const withdraw = kind === "coin" ? tmap[TYPE.COIN_SWAP_WITHDRAW] || {} : {};
+    const auto = kind === "auto" ? tmap[TYPE.AUTO_EXCHANGE] || {} : {};
+
+    const outMap: Record<string, number> = {};
+    const inMap:  Record<string, number> = {};
+
+    if (kind === "coin") {
+      for (const a of Object.keys(withdraw)) outMap[a] = (outMap[a] || 0) + withdraw[a].pos + withdraw[a].neg; // totals moved OUT (both signs mapped to absolute out)
+      for (const a of Object.keys(deposit))  inMap[a]  = (inMap[a]  || 0) + deposit[a].pos + deposit[a].neg;
+    } else {
+      // Auto-exchange: negative is converted out, positive converted in (by asset totals)
+      for (const a of Object.keys(auto)) {
+        const m = auto[a];
+        if (nonZero(m.neg)) outMap[a] = (outMap[a] || 0) + m.neg;
+        if (nonZero(m.pos)) inMap[a]  = (inMap[a]  || 0) + m.pos;
+      }
+    }
+
+    const outParts = Object.keys(outMap).filter(a => nonZero(outMap[a])).map(a => `${a} ${fmt(outMap[a])}`);
+    const inParts  = Object.keys(inMap).filter(a => nonZero(inMap[a])).map(a  => `${a} ${fmt(inMap[a])}`);
+
+    if (!outParts.length && !inParts.length) return [] as string[];
+
+    const template = kind === "coin" ? DICT[opts?.lang || "en"].coinSwapLine : DICT[opts?.lang || "en"].autoExLine;
+    const text = template
+      .replace("{out}", outParts.length ? outParts.join("  •  ") : "—")
+      .replace("{in}",  inParts.length  ? inParts.join("  •  ") : "—");
+
+    return [(kind === "coin" ? DICT[opts?.lang || "en"].coinSwap : DICT[opts?.lang || "en"].autoExchange) + ": " + text];
   }
-  if (opts?.anchorTransfer) sumInto(nets, opts.anchorTransfer.asset.toUpperCase(), opts.anchorTransfer.amount);
 
-  // hide tiny dust for BFUSD/FDUSD/LDUSDT
-  for (const [asset, thr] of Object.entries(DUST_HIDE)) {
-    if (Math.abs(nets[asset] ?? 0) < thr) nets[asset] = 0;
+  // Build section lines
+  const parts: string[] = [];
+  parts.push(L.infoUTC);
+
+  // Opening sentence by presence of anchor/baseline/transfer
+  const transfer = opts?.anchorTransfer;
+  const base = opts?.initialBalances;
+  if (anchorISO && transfer && base && base[transfer.asset] !== undefined) {
+    const before = base[transfer.asset] || 0;
+    const after  = before + transfer.amount;
+    parts.push(
+      `${anchorISO} UTC+0 — ${L.anchorTransferTitle} ${fmt(transfer.amount)} ${transfer.asset} ${L.anchorTransferTo} ${fmt(before)} ${transfer.asset} ${L.to} ${fmt(after)} ${transfer.asset}.`,
+      "",
+      L.afterThisTransfer
+    );
+  } else if (anchorISO && base && Object.keys(base).length) {
+    const list = Object.keys(base).map(a => `${a} ${fmt(base[a])}`).join("  •  ");
+    parts.push(`${anchorISO} UTC+0 — ${L.anchorOnly} ${list}`, "", L.afterThisTransfer);
+  } else if (anchorISO) {
+    parts.push(`${anchorISO} UTC+0 — ${L.yourRecords}`, "");
+  } else {
+    parts.push(L.yourRecords, "");
   }
 
-  const finals = Object.entries(nets)
-    .filter(([,v]) => !isZero(v))
-    .sort((a,b) => a[0].localeCompare(b[0]))
-    .map(([a,v]) => `${a} ${fmt(v)}`)
-    .join("  •  ");
+  // Detailed lines (only when present)
+  parts.push(...lineFor("profitLoss", "profitLoss"));
+  parts.push(...lineFor(L.tradingFees, [TYPE.COMMISSION]));
+  parts.push(...lineFor(L.fundingFees, [TYPE.FUNDING_FEE]));
+  parts.push(...lineFor(L.liqInsurance, [TYPE.INSURANCE_CLEAR]));
+  parts.push(...lineFor(L.referralIncomes, [TYPE.REFERRAL_KICKBACK]));
+  parts.push(...lineFor(L.feeRebates, [TYPE.COMISSION_REBATE]));
+  parts.push(...lineFor(L.giftMoney, [TYPE.CASH_COUPON]));
+  parts.push(...lineFor(L.posLimitIncrease, [TYPE.POSITION_LIMIT_INCREASE_FEE]));
+  parts.push(...lineFor(L.freePositions, [TYPE.POSITION_CLAIM_TRANSFER]));
+  parts.push(...lineFor(L.deliverySettle, [TYPE.DELIVERED_SETTELMENT]));
+  parts.push(...lineFor(L.futuresPresents, [TYPE.FUTURES_PRESENT]));
+  parts.push(...lineFor(L.eventsOrder, [TYPE.EVENT_CONTRACTS_ORDER]));
+  parts.push(...lineFor(L.eventsPayout, [TYPE.EVENT_CONTRACTS_PAYOUT]));
+  parts.push(...lineFor(L.busdReward, [TYPE.BFUSD_REWARD]));
+  parts.push(...lineFor("gridSplit", "gridSplit"));
+  parts.push(...swapOrAutoLines("coin"));
+  parts.push(...swapOrAutoLines("auto"));
 
-  if (finals) parts.push(`${label(lang, "final")}: ${finals}`);
+  // Unknown/Other types
+  const known = new Set(Object.values(TYPE));
+  const otherLines: string[] = [];
+  for (const typeKey of Object.keys(tmap)) {
+    if (known.has(typeKey as any)) continue;
+    const m = tmap[typeKey];
+    const items: string[] = [];
+    for (const a of Object.keys(m)) {
+      const entry = m[a];
+      const segs: string[] = [];
+      if (nonZero(entry.pos)) segs.push(`+${fmt(entry.pos)}`);
+      if (nonZero(entry.neg)) segs.push(`-${fmt(entry.neg)}`);
+      if (!segs.length) continue;
+      segs.push(`= ${fmt(entry.net)}`);
+      items.push(`${a}  ${segs.join("  /  ")}`);
+    }
+    if (items.length) otherLines.push(`• ${typeKey}: ${items.join("  •  ")}`);
+  }
+  if (otherLines.length) {
+    parts.push("", DICT[opts?.lang || "en"].otherTx + ":", ...otherLines);
+  }
 
-  return parts.join("\n\n");
+  // Overall by asset
+  const assetNet: Record<string, number> = {};
+  for (const typeKey of Object.keys(tmap)) {
+    const m = tmap[typeKey];
+    for (const a of Object.keys(m)) assetNet[a] = (assetNet[a] || 0) + m[a].net;
+  }
+  const overall: string[] = [];
+  for (const a of Object.keys(assetNet)) {
+    if (!nonZero(assetNet[a])) continue;
+    overall.push(`${a}  ${fmtSignedPlus(assetNet[a])}`);
+  }
+  if (overall.length) {
+    parts.push("", `${L.overall}: ${overall.join("  •  ")}`);
+  }
+
+  // Final wallet balance (computed): baseline (+ optional anchor transfer) + net( this range )
+  if (base && Object.keys(base).length) {
+    const final: Record<string, number> = { ...base };
+    if (transfer) final[transfer.asset] = (final[transfer.asset] || 0) + transfer.amount;
+    for (const a of Object.keys(assetNet)) final[a] = (final[a] || 0) + assetNet[a];
+
+    // Dust filter for BFUSD/FDUSD/LDUSDT per request
+    for (const dust of ["BFUSD", "FDUSD", "LDUSDT"]) {
+      if (Math.abs(final[dust] || 0) < 1e-7) delete final[dust];
+    }
+
+    const finalList = Object.keys(final)
+      .filter(a => nonZero(final[a]))
+      .sort()
+      .map(a => `${a}  ${fmt(final[a])}`);
+    if (finalList.length) {
+      parts.push("", `${L.finalAfter}: ${finalList.join("  •  ")}`);
+    }
+  }
+
+  // Remove empty lines that might have accumulated consecutively
+  return parts.filter((l, i, arr) => !(l === "" && arr[i-1] === "")).join("\n");
+}
+
+// ---------- Summary table (Type & Asset) ----------
+export function buildSummaryRows(rows: Row[]): SummaryRow[] {
+  const t = totalsByType(rows);
+  const out: SummaryRow[] = [];
+  for (const typeKey of Object.keys(t)) {
+    const m = t[typeKey];
+    for (const asset of Object.keys(m)) {
+      const e = m[asset];
+      const row: SummaryRow = { label: typeKey, asset, in: 0, out: 0, net: 0 };
+      if (nonZero(e.pos)) row.in = +fmt(e.pos);
+      if (nonZero(e.neg)) row.out = +fmt(e.neg);
+      if (nonZero(e.net)) row.net = +fmt(e.net);
+      if (row.in || row.out || row.net) out.push(row);
+    }
+  }
+  return out.sort((a,b) => a.label.localeCompare(b.label) || a.asset.localeCompare(b.asset));
+}
+
+// ---------- Agent audit text ----------
+export function buildAudit(
+  rows: Row[],
+  params: {
+    anchorTs: number;
+    endTs?: number;
+    baseline?: Record<string, number>;
+    anchorTransfer?: { asset: string; amount: number };
+  }
+): string {
+  const { anchorTs, endTs, baseline, anchorTransfer } = params;
+  const inRange = rows.filter(r => r.ts >= anchorTs && (endTs ? r.ts <= endTs : true))
+                      .sort((a,b) => a.ts - b.ts);
+
+  const t = totalsByType(inRange);
+
+  const lines: string[] = [];
+  lines.push("Agent Balance Audit");
+  lines.push(`Anchor (UTC+0): ${new Date(anchorTs).toISOString().replace("T"," ").replace("Z","")}${endTs ? `  →  End: ${new Date(endTs).toISOString().replace("T"," ").replace("Z","")}` : ""}`);
+  if (baseline && Object.keys(baseline).length) {
+    const bl = Object.keys(baseline).map(a => `${a} ${fmt(baseline[a])}`).join("  •  ");
+    lines.push("", "Baseline (before anchor):", `  • ${bl}`);
+  } else {
+    lines.push("", "Baseline: not provided (rolling from zero).");
+  }
+  if (anchorTransfer) lines.push("", `Applied anchor transfer: ${fmtSignedPlus(anchorTransfer.amount)} ${anchorTransfer.asset}`);
+
+  lines.push("", "Activity after anchor:");
+  const perType: string[] = [];
+  for (const typeKey of Object.keys(t).sort()) {
+    const m = t[typeKey];
+    const items: string[] = [];
+    for (const a of Object.keys(m)) {
+      const e = m[a];
+      const segs: string[] = [];
+      if (nonZero(e.pos)) segs.push(`+${fmt(e.pos)}`);
+      if (nonZero(e.neg)) segs.push(`-${fmt(e.neg)}`);
+      if (!segs.length) continue;
+      segs.push(`= ${fmt(e.net)}`);
+      items.push(`${a}  ${segs.join(" / ")}`);
+    }
+    if (items.length) perType.push(`• ${typeKey}: ${items.join("  •  ")}`);
+  }
+  if (perType.length) lines.push(...perType);
+  else lines.push("  • No activity.");
+
+  // Net effect and final expected balances
+  const assetNet: Record<string, number> = {};
+  for (const typeKey of Object.keys(t)) {
+    const m = t[typeKey];
+    for (const a of Object.keys(m)) assetNet[a] = (assetNet[a] || 0) + m[a].net;
+  }
+  lines.push("", "Net effect (after anchor):");
+  const netLines = Object.keys(assetNet).filter(a => nonZero(assetNet[a]))
+    .map(a => `  • ${a}  ${fmtSignedPlus(assetNet[a])}`);
+  lines.push(...(netLines.length ? netLines : ["  • 0"]));
+
+  if (baseline && Object.keys(baseline).length) {
+    const final: Record<string, number> = { ...baseline };
+    if (anchorTransfer) final[anchorTransfer.asset] = (final[anchorTransfer.asset] || 0) + anchorTransfer.amount;
+    for (const a of Object.keys(assetNet)) final[a] = (final[a] || 0) + assetNet[a];
+
+    // Dust filter
+    for (const dust of ["BFUSD", "FDUSD", "LDUSDT"]) {
+      if (Math.abs(final[dust] || 0) < 1e-7) delete final[dust];
+    }
+
+    const finalLines = Object.keys(final)
+      .filter(a => nonZero(final[a]))
+      .sort()
+      .map(a => `  • ${a}  ${fmt(final[a])}`);
+    if (finalLines.length) {
+      lines.push("", "Final expected balances:", ...finalLines);
+    }
+  }
+
+  return lines.join("\n");
 }
