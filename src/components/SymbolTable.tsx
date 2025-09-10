@@ -72,7 +72,10 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
   // ——— Tek satır metin export’u (PNG, tüm tablo için aşağıda) ———
   const buildBlockText = (b: Block) => {
     const lines: string[] = [];
-    const dispSym = b.symbol === "ADMIN_CLEARING" ? "Insurance Fund Clearance" : b.symbol;
+    const dispSym =
+      b.symbol === "ADMIN_CLEARING" || b.symbol === "CHAT_APPLY_CLEARING"
+        ? "Insurance Fund Clearance"
+        : b.symbol;
     const sect = (title: string, m: TotalsMap) => {
       const keys = Object.keys(m).sort();
       if (!keys.length) return;
@@ -278,7 +281,10 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
           <tbody>
             {blocks.map((b, i) => {
               const textForRow = buildBlockText(b);
-              const displaySymbol = b.symbol === "ADMIN_CLEARING" ? "Insurance Fund Clearance" : b.symbol;
+              const displaySymbol =
+                b.symbol === "ADMIN_CLEARING" || b.symbol === "CHAT_APPLY_CLEARING"
+                  ? "Insurance Fund Clearance"
+                  : b.symbol;
               return (
                 <tr key={b.symbol} style={{ background: i % 2 ? "#fafafa" : "transparent" }}>
                   <td style={{ textAlign: "left", fontWeight: 700, whiteSpace: "nowrap", wordBreak: "keep-all", minWidth: 180, maxWidth: 180 }} title={displaySymbol}>
