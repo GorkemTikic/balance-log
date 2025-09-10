@@ -189,7 +189,7 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
 
   const colStyles = {
     sym: { width: 180 },
-    col: { width: 1 },
+    col: { width: 140 }, // PATCHED: 1 yerine 140
     act: { width: 200 },
   } as const;
 
@@ -269,13 +269,13 @@ export default function SymbolTable({ rows }: { rows: Row[] }) {
           </colgroup>
           <thead>
             <tr>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Symbol</th>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Realized PnL</th>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Funding</th>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Trading Fees</th>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Insurance Clearance Fee</th>
-              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff" }}>Final Net (All Fees)</th>
-              <th style={{ textAlign: "right", position: "sticky", top: 0, background: "#fff" }}>Actions</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Symbol</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Realized PnL</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Funding</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Trading Fees</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Insurance Clearance Fee</th>
+              <th style={{ textAlign: "left", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Final Net (All Fees)</th>
+              <th style={{ textAlign: "right", position: "sticky", top: 0, background: "#fff", whiteSpace: "nowrap" }}>Actions</th>
             </tr>
           </thead>
           <tbody>
