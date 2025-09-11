@@ -39,30 +39,62 @@ export default function SwapsEvents({
   if (!hasCoin && !hasAuto && !hasEvents) return null;
 
   return (
-    <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+    <div style={{ display: "grid", gap: 16, marginTop: 16 }}>
       {/* COIN SWAPS */}
-      {hasCoin && (
-        <div className="card">
-          <h3 className="section-title" style={{ marginBottom: 8 }}>
-            Coin Swaps
-          </h3>
-          <ul className="mono small" style={{ lineHeight: "20px" }}>
-            {coinSwapLines.map((l, i) => (
-              <li key={i}>{l.text}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+{hasCoin && (
+  <div className="card">
+    <h3 className="section-title" style={{ marginBottom: 8 }}>
+      Coin Swaps
+    </h3>
+    <ul className="mono small" style={{ lineHeight: "22px" }}>
+      {coinSwapLines.map((l, i) => (
+        <li key={i} style={{ marginBottom: 4 }}>
+          {l.text.split(" ").map((part, j) => {
+            if (part.startsWith("Out:") || part.startsWith("−")) {
+              return (
+                <span key={j} style={{ color: "#dc2626", marginRight: 4 }}>
+                  {part}
+                </span>
+              );
+            }
+            if (part.startsWith("In:") || part.startsWith("+")) {
+              return (
+                <span key={j} style={{ color: "#16a34a", marginRight: 4 }}>
+                  {part}
+                </span>
+              );
+            }
+            return <span key={j}>{part} </span>;
+          })}
+        </li>
+      ))}
+    </ul>
+  </div>
+)}
 
       {/* AUTO-EXCHANGE */}
       {hasAuto && (
-        <div className="card">
-          <h3 className="section-title" style={{ marginBottom: 8 }}>
+        <div className="card" style={{ borderLeft: "4px solid #9333ea" }}>
+          <h3
+            className="section-title"
+            style={{ marginBottom: 8, color: "#9333ea" }}
+          >
             Auto-Exchange
           </h3>
-          <ul className="mono small" style={{ lineHeight: "20px" }}>
+          <ul className="mono small" style={{ lineHeight: "22px" }}>
             {autoExLines.map((l, i) => (
-              <li key={i}>{l.text}</li>
+              <li key={i} style={{ marginBottom: 6 }}>
+                <span style={{ color: "#6b7280", fontSize: 12, marginRight: 8 }}>
+                  {l.time}
+                </span>
+                <span style={{ color: "#dc2626", marginRight: 6 }}>
+                  {l.text.split("→")[0]}
+                </span>
+                <span style={{ color: "#9333ea", fontWeight: 600 }}>→</span>
+                <span style={{ color: "#16a34a", marginLeft: 6 }}>
+                  {l.text.split("→")[1]}
+                </span>
+              </li>
             ))}
           </ul>
         </div>
@@ -76,7 +108,7 @@ export default function SwapsEvents({
           </h3>
           <div className="tablewrap">
             <table className="table mono small">
-              <thead>
+              <thead style={{ background: "#f3f4f6" }}>
                 <tr>
                   <th style={{ textAlign: "left" }}>Asset</th>
                   <th style={{ textAlign: "right" }}>Orders +</th>
@@ -102,11 +134,19 @@ export default function SwapsEvents({
                   return (
                     <tr key={asset}>
                       <td style={{ textAlign: "left" }}>{asset}</td>
-                      <td style={{ textAlign: "right" }}>{fmtTrim(o.pos)}</td>
-                      <td style={{ textAlign: "right" }}>-{fmtTrim(o.neg)}</td>
+                      <td style={{ textAlign: "right", color: "#16a34a" }}>
+                        {fmtTrim(o.pos)}
+                      </td>
+                      <td style={{ textAlign: "right", color: "#dc2626" }}>
+                        -{fmtTrim(o.neg)}
+                      </td>
                       <td style={{ textAlign: "right" }}>{fmtTrim(o.net)}</td>
-                      <td style={{ textAlign: "right" }}>{fmtTrim(p.pos)}</td>
-                      <td style={{ textAlign: "right" }}>-{fmtTrim(p.neg)}</td>
+                      <td style={{ textAlign: "right", color: "#16a34a" }}>
+                        {fmtTrim(p.pos)}
+                      </td>
+                      <td style={{ textAlign: "right", color: "#dc2626" }}>
+                        -{fmtTrim(p.neg)}
+                      </td>
                       <td style={{ textAlign: "right" }}>{fmtTrim(p.net)}</td>
                     </tr>
                   );
