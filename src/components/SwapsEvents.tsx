@@ -4,6 +4,16 @@ import React from "react";
 type Line = { time: string; ts: number; text: string };
 type TotalsMap = Record<string, { pos: number; neg: number; net: number }>;
 
+/* --- Number formatting (same as StoryDrawer) --- */
+function fmtTrim(value: number) {
+  let s = String(value);
+  if (/e/i.test(s)) s = value.toFixed(20); // expand scientific notation
+  if (s.includes(".")) {
+    s = s.replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+  }
+  return s === "-0" ? "0" : s;
+}
+
 export default function SwapsEvents({
   coinSwapLines,
   autoExLines,
@@ -15,9 +25,6 @@ export default function SwapsEvents({
   eventsOrdersByAsset: TotalsMap;
   eventsPayoutsByAsset: TotalsMap;
 }) {
-  const fmt = (n: number) =>
-    Number.isFinite(n) ? String(Math.round(n * 1e8) / 1e8) : "0";
-
   const assets = Array.from(
     new Set([
       ...Object.keys(eventsOrdersByAsset || {}),
@@ -95,12 +102,12 @@ export default function SwapsEvents({
                   return (
                     <tr key={asset}>
                       <td style={{ textAlign: "left" }}>{asset}</td>
-                      <td style={{ textAlign: "right" }}>{fmt(o.pos)}</td>
-                      <td style={{ textAlign: "right" }}>-{fmt(o.neg)}</td>
-                      <td style={{ textAlign: "right" }}>{fmt(o.net)}</td>
-                      <td style={{ textAlign: "right" }}>{fmt(p.pos)}</td>
-                      <td style={{ textAlign: "right" }}>-{fmt(p.neg)}</td>
-                      <td style={{ textAlign: "right" }}>{fmt(p.net)}</td>
+                      <td style={{ textAlign: "right" }}>{fmtTrim(o.pos)}</td>
+                      <td style={{ textAlign: "right" }}>-{fmtTrim(o.neg)}</td>
+                      <td style={{ textAlign: "right" }}>{fmtTrim(o.net)}</td>
+                      <td style={{ textAlign: "right" }}>{fmtTrim(p.pos)}</td>
+                      <td style={{ textAlign: "right" }}>-{fmtTrim(p.neg)}</td>
+                      <td style={{ textAlign: "right" }}>{fmtTrim(p.net)}</td>
                     </tr>
                   );
                 })}
